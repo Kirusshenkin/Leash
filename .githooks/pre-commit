@@ -1,0 +1,6 @@
+#!/bin/sh
+# Не даёт закоммитить то, что похоже на ключ API Anthropic.
+if git diff --cached -U0 --no-color | grep -E '^\+' | grep -qE 'sk-ant-[A-Za-z0-9_-]{20,}'; then
+	echo "pre-commit: в изменениях похоже на ключ API (sk-ant-…). Коммит отменён."
+	exit 1
+fi

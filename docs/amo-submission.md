@@ -1,0 +1,45 @@
+# Публикация на addons.mozilla.org
+
+Публикацию выполняет владелец аккаунта AMO; здесь всё, что нужно приложить.
+
+## Перед загрузкой
+
+1. В `extension/manifest.json` заменить `browser_specific_settings.gecko.id`
+   (`leash@localhost`) на постоянный ID, например `leash@<ваш-домен>`.
+   ID после первой публикации не меняется.
+2. Поднять `version`.
+3. `make check && make e2e && make zip` — архив в `dist/leash-<версия>.zip`.
+
+## Исходный код для ревьюеров
+
+AMO требует исходники, если в архиве есть сгенерированный код. Здесь это
+`pkg/leash_bg.wasm` и `pkg/leash.js` (wasm-bindgen). Приложить архив
+репозитория (без `target/`, `dist/`, `e2e/` можно оставить) и инструкцию:
+
+```
+Требования: macOS или Linux, rustup, wasm-bindgen-cli 0.2.128.
+rustup показывает тулчейн из rust-toolchain.toml и ставит его сам.
+cargo install wasm-bindgen-cli --version '=0.2.128' --locked
+make build
+Сгенерированные файлы: extension/pkg/leash.js, extension/pkg/leash_bg.wasm.
+Зависимости Rust — только из vendor/ (сборка --offline --locked).
+```
+
+## Разрешения и их обоснование (поле «Notes to reviewer»)
+
+- `storage` — настройки; ключ API в `storage.session`.
+- `scripting` — внедрение content-скрипта по требованию, только в главный фрейм
+  вкладки сайта, который пользователь явно разрешил.
+- `host_permissions: https://api.anthropic.com/*` — запросы к Claude API.
+- `optional_host_permissions: https://*/*` — запрашиваются по одному сайту
+  через `permissions.request` при сохранении списка разрешённых сайтов.
+- Удалённый код не загружается; `wasm-unsafe-eval` нужен только для своего WASM.
+
+## Политика конфиденциальности (текст для листинга)
+
+Leash не собирает и не передаёт данные разработчику. Расширение отправляет в
+Anthropic API (https://api.anthropic.com) ваш ключ API, ваши сообщения и
+содержимое страниц сайтов, которые вы разрешили в настройках, — только когда
+вы даёте агенту задачу. На эти данные распространяются условия Anthropic для
+вашего ключа. Ключ хранится в памяти сессии Firefox и стирается при закрытии
+браузера. Списки сайтов и настройки хранятся локально в профиле Firefox.

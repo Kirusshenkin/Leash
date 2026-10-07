@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Leash — настройки</title>
+  <link rel="stylesheet" href="../ui.css">
+  <script type="module" src="options.js"></script>
+</head>
+<body class="options">
+  <h1>Leash — настройки</h1>
+
+  <section>
+    <h2>Ключ API Anthropic</h2>
+    <p class="hint">Используйте отдельный ключ с лимитом расходов в консоли Anthropic.
+      Ключ хранится в storage.session: он недоступен скриптам на страницах, не показывается после
+      сохранения и стирается при закрытии Firefox — после перезапуска его нужно ввести снова.</p>
+    <p id="key-status"></p>
+    <input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…">
+    <div class="buttons">
+      <button id="save-key" type="button">Сохранить ключ</button>
+      <button id="clear-key" type="button">Удалить ключ</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Модель</h2>
+    <label for="model">Модель</label>
+    <select id="model"></select>
+    <label for="max-tokens">Лимит токенов ответа</label>
+    <input id="max-tokens" type="number" min="256" max="8192" step="1">
+    <div class="buttons">
+      <button id="save" type="button">Сохранить</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Сайты</h2>
+    <p class="hint">Агент работает только на сайтах из списка разрешённых: точное совпадение
+      схемы, имени и порта, только https, без масок и поддоменов. Запрет сильнее разрешения.
+      При сохранении Firefox спросит доступ к сайтам из списка: без него сайт закрыт.</p>
+    <label for="allow">Разрешённые сайты (по одному на строку)</label>
+    <textarea id="allow" rows="6" spellcheck="false" placeholder="example.com"></textarea>
+    <label for="deny">Запрещённые сайты (закрываются вместе с поддоменами)</label>
+    <textarea id="deny" rows="4" spellcheck="false" placeholder="mybank.example"></textarea>
+    <div class="buttons">
+      <button id="save-sites" type="button">Сохранить списки</button>
+    </div>
+    <label for="probe">Проверить адрес по сохранённым спискам</label>
+    <input id="probe" type="url" autocomplete="off" spellcheck="false" placeholder="адрес страницы">
+    <p id="probe-result" class="status" aria-live="polite"></p>
+    <details>
+      <summary>Встроенный запрет (не отключается)</summary>
+      <ul id="builtin"></ul>
+    </details>
+  </section>
+
+  <p id="message" class="status" aria-live="polite"></p>
+</body>
+</html>

@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Leash",
+  "version": "0.2.0",
+  "description": "Агент в боковой панели на вашем API-ключе. Работает только на разрешённых вами сайтах; политика безопасности исполняется кодом, не моделью.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "leash@localhost",
+      "strict_min_version": "140.0"
+    }
+  },
+  "permissions": ["storage", "scripting"],
+  "host_permissions": ["https://api.anthropic.com/*"],
+  "optional_host_permissions": ["https://*/*"],
+  "background": {
+    "scripts": ["background/background.js"],
+    "type": "module"
+  },
+  "sidebar_action": {
+    "default_panel": "sidebar/sidebar.html",
+    "default_title": "Leash",
+    "default_icon": "icons/leash.svg",
+    "open_at_install": false
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "commands": {
+    "leash-stop": {
+      "suggested_key": { "default": "Alt+Shift+X" },
+      "description": "Остановить агента"
+    }
+  },
+  "icons": { "48": "icons/leash.svg", "96": "icons/leash.svg" },
+  "incognito": "not_allowed",
+  "content_security_policy": {
+    "extension_pages": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self'; connect-src 'self' https://api.anthropic.com; form-action 'none'; base-uri 'none'"
+  }
+}

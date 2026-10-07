@@ -1,0 +1,60 @@
+# Сборка без npm и бандлеров. Тулчейн закреплён в rust-toolchain.toml.
+RUSTUP_BIN ?= $(shell brew --prefix rustup 2>/dev/null)/bin
+export PATH := $(RUSTUP_BIN):$(HOME)/.cargo/bin:$(PATH)
+# make 3.81 на macOS ищет команды по старому PATH, поэтому пути явные.
+CARGO        := $(RUSTUP_BIN)/cargo
+WASM_BINDGEN := $(HOME)/.cargo/bin/wasm-bindgen
+
+TARGET  := wasm32-unknown-unknown
+WASM    := target/$(TARGET)/release/leash.wasm
+PKG     := extension/pkg
+VERSION := $(shell sed -n 's/.*"version": "\([0-9.]*\)".*/\1/p' extension/manifest.json)
+# wasm-bindgen-cli обязан совпадать с версией крейта из Cargo.lock.
+BINDGEN_VERSION := $(shell grep -A1 '^name = "wasm-bindgen"$$' Cargo.lock | sed -n 's/version = "\(.*\)"/\1/p')
+
+.PHONY: all build test lint static deny audit check zip hooks clean e2e
+
+all: check
+
+build:
+	@$(WASM_BINDGEN) --version | grep -qx "wasm-bindgen $(BINDGEN_VERSION)" || \
+		{ echo "нужен wasm-bindgen-cli $(BINDGEN_VERSION): cargo install wasm-bindgen-cli --version '=$(BINDGEN_VERSION)' --locked"; exit 1; }
+	$(CARGO) build --locked --offline --release --target $(TARGET)
+	$(WASM_BINDGEN) --target web --no-typescript --out-dir $(PKG) $(WASM)
+
+test:
+	$(CARGO) test --locked --offline
+
+lint:
+	$(CARGO) fmt --all --check
+	$(CARGO) clippy --locked --offline --all-targets -- -D warnings
+	$(CARGO) clippy --locked --offline --target $(TARGET) -- -D warnings
+
+static: build
+	sh scripts/check-static.sh
+
+deny:
+	$(CARGO) deny --locked check
+
+audit:
+	$(CARGO) audit --deny warnings
+
+check: lint test static deny audit
+
+zip: check
+	mkdir -p dist
+	rm -f dist/leash-$(VERSION).zip
+	cd extension && zip -r -X ../dist/leash-$(VERSION).zip manifest.json ui.css background sidebar options content icons pkg
+	@for f in manifest.json background/background.js content/content.js sidebar/sidebar.html options/options.html pkg/leash_bg.wasm; do \
+		unzip -l dist/leash-$(VERSION).zip | grep -q " $$f$$" || { echo "в архиве нет $$f"; exit 1; }; \
+	done
+
+hooks:
+	git config core.hooksPath .githooks
+
+clean:
+	$(CARGO) clean
+	rm -rf $(PKG) dist
+
+e2e: build
+	cd e2e && go run .

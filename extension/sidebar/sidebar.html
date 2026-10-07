@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Leash</title>
+  <link rel="stylesheet" href="../ui.css">
+  <script type="module" src="sidebar.js"></script>
+</head>
+<body class="sidebar">
+  <header>
+    <span class="brand">Leash</span>
+    <button id="settings" type="button">Настройки</button>
+  </header>
+  <main id="log" aria-live="polite"></main>
+  <section id="confirm" class="confirm" hidden>
+    <p id="confirm-text"></p>
+    <div class="buttons">
+      <button id="confirm-allow" type="button">Разрешить</button>
+      <button id="confirm-deny" type="button" class="stop">Отклонить</button>
+    </div>
+  </section>
+  <p id="status" class="status"></p>
+  <footer>
+    <textarea id="input" rows="3" maxlength="8000" placeholder="Задача или вопрос…" disabled></textarea>
+    <div class="buttons">
+      <button id="send" type="button" disabled>Отправить</button>
+      <button id="stop" type="button" class="stop">Стоп</button>
+      <button id="reset" type="button">Новый чат</button>
+    </div>
+  </footer>
+</body>
+</html>
