@@ -12,7 +12,7 @@ VERSION := $(shell sed -n 's/.*"version": "\([0-9.]*\)".*/\1/p' extension/manife
 # wasm-bindgen-cli обязан совпадать с версией крейта из Cargo.lock.
 BINDGEN_VERSION := $(shell grep -A1 '^name = "wasm-bindgen"$$' Cargo.lock | sed -n 's/version = "\(.*\)"/\1/p')
 
-.PHONY: all build test lint static deny audit check zip hooks clean e2e
+.PHONY: all build test lint static deny audit check zip source hooks clean e2e
 
 all: check
 
@@ -48,6 +48,11 @@ zip: check
 	@for f in manifest.json background/background.js content/content.js sidebar/sidebar.html options/options.html pkg/leash_bg.wasm; do \
 		unzip -l dist/leash-$(VERSION).zip | grep -q " $$f$$" || { echo "в архиве нет $$f"; exit 1; }; \
 	done
+
+# Исходники для ревьюеров AMO: только то, что в git (без e2e/private, target, dist).
+source:
+	mkdir -p dist
+	git archive --format=zip -o dist/leash-src-$(VERSION).zip HEAD
 
 hooks:
 	git config core.hooksPath .githooks

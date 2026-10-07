@@ -4,9 +4,10 @@
 
 ## Перед загрузкой
 
-1. В `extension/manifest.json` заменить `browser_specific_settings.gecko.id`
-   (`leash@localhost`) на постоянный ID, например `leash@<ваш-домен>`.
-   ID после первой публикации не меняется.
+1. ID расширения — `leash@kirusshenkin.github.io` (после первой публикации не
+   меняется). Декларация `data_collection_permissions`: `websiteContent`,
+   `browsingActivity` — содержимое и адреса разрешённых страниц уходят в
+   Anthropic API по задаче пользователя (обязательна на AMO с 03.11.2025).
 2. Поднять `version`.
 3. `make check && make e2e && make zip` — архив в `dist/leash-<версия>.zip`.
 
@@ -14,7 +15,8 @@
 
 AMO требует исходники, если в архиве есть сгенерированный код. Здесь это
 `pkg/leash_bg.wasm` и `pkg/leash.js` (wasm-bindgen). Приложить архив
-репозитория (без `target/`, `dist/`, `e2e/` можно оставить) и инструкцию:
+репозитория — `make source` (`dist/leash-src-<версия>.zip`, только файлы из git;
+приватные материалы `e2e/private/` туда не попадают) — и инструкцию:
 
 ```
 Требования: macOS или Linux, rustup, wasm-bindgen-cli 0.2.128.

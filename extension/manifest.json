@@ -5,8 +5,11 @@
   "description": "Агент в боковой панели на вашем API-ключе. Работает только на разрешённых вами сайтах; политика безопасности исполняется кодом, не моделью.",
   "browser_specific_settings": {
     "gecko": {
-      "id": "leash@localhost",
-      "strict_min_version": "140.0"
+      "id": "leash@kirusshenkin.github.io",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": ["websiteContent", "browsingActivity"]
+      }
     }
   },
   "permissions": ["storage", "scripting"],

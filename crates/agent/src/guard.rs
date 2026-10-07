@@ -120,9 +120,77 @@ fn typed_by_user(user_text: &str, text: &str) -> bool {
     text.chars().count() >= MIN_USER_FRAGMENT && user_text.contains(text)
 }
 
+/// Слово целиком в имени элемента ищется по «скелету»: страница не должна
+/// прятать «удалить» от проверки невидимым символом, диакритикой, буквой
+/// другого алфавита того же вида или полноширинной формой.
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    let h = haystack.to_lowercase();
-    needles.iter().any(|n| h.contains(n))
+    let h = skeleton(haystack);
+    needles.iter().any(|n| h.contains(&skeleton(n)))
+}
+
+/// Нижний регистр без невидимых символов и комбинирующих знаков; похожие
+/// буквы кириллицы и греческого сведены к латинским, пробелы — к одному.
+fn skeleton(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut space = false;
+    for c in s.chars().flat_map(char::to_lowercase) {
+        let c = match c {
+            '\u{00AD}'
+            | '\u{034F}'
+            | '\u{061C}'
+            | '\u{115F}'
+            | '\u{1160}'
+            | '\u{17B4}'
+            | '\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{E0000}'..='\u{E0FFF}'
+            | '\u{0300}'..='\u{036F}'
+            | '\u{0483}'..='\u{0489}'
+            | '\u{1AB0}'..='\u{1AFF}'
+            | '\u{1DC0}'..='\u{1DFF}'
+            | '\u{20D0}'..='\u{20FF}'
+            | '\u{FE20}'..='\u{FE2F}' => continue,
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            'а' | 'α' => 'a',
+            'в' | 'β' => 'b',
+            'с' | 'ς' => 'c',
+            'е' | 'ё' | 'є' | 'ε' => 'e',
+            'һ' => 'h',
+            'і' | 'ї' | 'ı' | 'ι' | 'ӏ' => 'i',
+            'ј' => 'j',
+            'к' | 'κ' => 'k',
+            'м' => 'm',
+            'н' | 'η' => 'n',
+            'о' | 'ο' | '0' => 'o',
+            'р' | 'ρ' => 'p',
+            'ԛ' => 'q',
+            'ѕ' => 's',
+            'т' | 'τ' => 't',
+            'у' | 'υ' | 'γ' => 'y',
+            'х' | 'χ' => 'x',
+            'ԝ' | 'ѡ' => 'w',
+            'ь' => 'b',
+            c if c.is_whitespace() => ' ',
+            c => c,
+        };
+        if c == ' ' {
+            if !space {
+                out.push(' ');
+            }
+            space = true;
+        } else {
+            out.push(c);
+            space = false;
+        }
+    }
+    out
 }
 
 fn is_root(url: &str, origin: &Origin) -> bool {
@@ -494,8 +562,14 @@ mod tests {
         pass.kind = "password".into();
         let mut card = textbox(2, "Card");
         card.autocomplete = "cc-number".into();
-        let w = World::new(vec![pass, card, textbox(3, "Ваш пароль")]);
-        for id in 1..=3 {
+        let w = World::new(vec![
+            pass,
+            card,
+            textbox(3, "Ваш пароль"),
+            textbox(6, "Ваш па\u{200B}роль"),
+            textbox(7, "Pasѕword"),
+        ]);
+        for id in [1, 2, 3, 6, 7] {
             assert!(
                 is_confirm(&w.decide(ToolCall::TypeText {
                     element: id,
@@ -618,6 +692,20 @@ mod tests {
             "Confirm payment",
             "DELETE",
             "ОПЛАТ",
+            // Маскировка: невидимые символы, буквы другого алфавита,
+            // диакритика, полноширинные формы, неразрывный пробел.
+            "Уда\u{200C}лить",
+            "Удал\u{00AD}ить",
+            "Уда\u{2060}лить",
+            "УдаліТЬ",
+            "Удaлить",
+            "Уда\u{0301}лить",
+            "Dеlеtе",
+            "ｄｅｌｅｔｅ",
+            "de\u{FEFF}lete",
+            "Оплатить",
+            "Pаy",
+            "close\u{00A0}account",
         ] {
             let w = World::new(vec![el(1, "button", name)]);
             assert!(

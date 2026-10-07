@@ -22,11 +22,12 @@ import (
 	"time"
 )
 
-// APIRequest — запрос расширения к мок API.
+// APIRequest — запрос расширения к API; Resp — что ответили (мок или модель).
 type APIRequest struct {
 	Key  string
 	Body map[string]any
 	Raw  string
+	Resp map[string]any
 }
 
 // Post — запрос на тестовый сайт не методом GET (отправка формы и т.п.).
@@ -48,8 +49,10 @@ type Proxy struct {
 	posts    []Post
 	hits     []string
 	script   func(n int, req APIRequest) Reply
-	ln       net.Listener
-	tls      *tls.Config
+	// realKey: не пусто — запросы уходят в настоящий API с этим ключом.
+	realKey string
+	ln      net.Listener
+	tls     *tls.Config
 }
 
 func newProxy() (*Proxy, error) {
@@ -159,9 +162,14 @@ func (p *Proxy) api(w *response, r *http.Request, body []byte) {
 	script := p.script
 	p.mu.Unlock()
 	reply := Reply{Body: final("нет сценария")}
-	if script != nil {
+	if p.realKey != "" {
+		reply = forward(body, p.realKey)
+	} else if script != nil {
 		reply = script(n, req)
 	}
+	p.mu.Lock()
+	p.requests[n].Resp = reply.Body
+	p.mu.Unlock()
 	time.Sleep(reply.Delay)
 	if reply.Status != 0 {
 		w.status = reply.Status
@@ -297,4 +305,31 @@ func lastResults(req APIRequest) []result {
 func systemPrompt(req APIRequest) string {
 	s, _ := req.Body["system"].(string)
 	return s
+}
+
+// forward отправляет тело запроса расширения в настоящий Messages API с
+// ключом из окружения (ключ расширения в стенде фальшивый).
+func forward(body []byte, key string) Reply {
+	req, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", strings.NewReader(string(body)))
+	if err != nil {
+		return Reply{Status: 500, Body: apiError("api_error")}
+	}
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("x-api-key", key)
+	client := &http.Client{Timeout: 170 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return Reply{Status: 502, Body: apiError("api_error")}
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return Reply{Status: 502, Body: apiError("api_error")}
+	}
+	return Reply{Status: resp.StatusCode, Body: out}
+}
+
+func apiError(kind string) map[string]any {
+	return map[string]any{"type": "error", "error": map[string]any{"type": kind, "message": "e2e"}}
 }

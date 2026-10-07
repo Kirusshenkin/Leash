@@ -470,7 +470,7 @@ mod tests {
 
     #[test]
     fn sender_check() {
-        let id = "leash@localhost";
+        let id = "leash@kirusshenkin.github.io";
         let url = "moz-extension://uuid/sidebar/sidebar.html";
         let good = SenderInfo {
             id: Some(id.into()),

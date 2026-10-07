@@ -315,7 +315,11 @@ pub(crate) fn parse_response(json: &Value) -> Result<Reply, ApiError> {
                 let input = block.get("input").filter(|i| matches!(i, Value::Obj(_)));
                 match (id, name, input) {
                     (Some(id), Some(name), Some(input))
-                        if valid_tool_id(id) && valid_tool_name(name) =>
+                        if valid_tool_id(id)
+                            && valid_tool_name(name)
+                            && !content.iter().any(
+                                |c| matches!(c, Content::ToolUse { id: seen, .. } if seen == id),
+                            ) =>
                     {
                         content.push(Content::ToolUse {
                             id: id.to_owned(),
@@ -758,7 +762,7 @@ mod tests {
         assert!(body.contains("\"tool_use_id\":\"t1\""));
     }
 
-    // Duplicate tool IDs в одном ответе должны приниматься или отклоняться строго.
+    // Повтор tool_use.id в одном ответе.
     #[test]
     fn parse_response_duplicate_tool_ids() {
         // API не позволяет дублировать tool_use.id в одном ответе.
@@ -770,16 +774,12 @@ mod tests {
                 tool_use("t1", "scroll"), // Дубликат ID.
             ],
         );
-        // Проверяем, не молчим ли мы при дубликатах.
-        let result = parse_response(&dup_response);
-        // Поведение: либо принимаем оба (текущее), либо отклоняем (безопаснее).
-        // На данный момент API не может создать это, так что тест документирует текущее
-        // поведение и обнаружит, если оно изменится.
-        if let Ok(r) = result {
-            let ids: Vec<_> = r.calls().map(|(id, _, _)| id).collect();
-            // Если мы принимаем оба, ids = ["t1", "t1"].
-            assert_eq!(ids.len(), 2);
-        }
+        // Два результата с одним id API не примет, а подтверждение одного
+        // вызова нельзя отличить от другого: ответ отклоняется.
+        assert!(matches!(
+            parse_response(&dup_response),
+            Err(ApiError::BadResponse)
+        ));
     }
 
     // Отсутствующие, частичные и огромные числа токенов.

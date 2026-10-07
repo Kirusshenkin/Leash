@@ -65,3 +65,18 @@ fn nothing_widens_the_surface() {
         assert_eq!(count(forbidden), 0, "в манифесте появилось {forbidden}");
     }
 }
+
+#[test]
+fn publication_metadata_is_reviewed() {
+    // ID после первой публикации на AMO не меняется.
+    assert_eq!(count("\"id\": \"leash@kirusshenkin.github.io\""), 1);
+    assert_eq!(count("localhost"), 0);
+    // AMO требует декларацию передачи данных: страницы и их адреса уходят
+    // в Anthropic API по задаче пользователя.
+    assert_eq!(
+        count("\"required\": [\"websiteContent\", \"browsingActivity\"]"),
+        1
+    );
+    assert_eq!(count("\"data_collection_permissions\""), 1);
+    assert_eq!(count("\"optional\""), 0);
+}

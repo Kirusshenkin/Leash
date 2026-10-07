@@ -21,30 +21,62 @@ import (
 
 const (
 	firefoxBin = "/Applications/Firefox.app/Contents/MacOS/firefox"
-	extID      = "leash@localhost"
 	// Фальшивый ключ собран из частей, чтобы pre-commit не принял его за настоящий.
 	testKey = "sk-ant-" + "api03-" + "e2eTESTKEYe2eTESTKEYe2eTESTKEYe2eTESTKEY0000"
 )
 
+// ID расширения и виджета его панели — из манифеста (как makeWidgetId в Firefox).
+var extID, sidebarID string
+
+func readExtID(extDir string) {
+	raw, err := os.ReadFile(filepath.Join(extDir, "manifest.json"))
+	must(err)
+	var m struct {
+		BSS struct {
+			Gecko struct {
+				ID string `json:"id"`
+			} `json:"gecko"`
+		} `json:"browser_specific_settings"`
+	}
+	must(json.Unmarshal(raw, &m))
+	extID = m.BSS.Gecko.ID
+	sidebarID = regexp.MustCompile(`[^a-z0-9_-]`).ReplaceAllString(strings.ToLower(extID), "_") + "-sidebar-action"
+}
+
 type env struct {
 	m *Marionette
 	p *Proxy
+	// real: запросы идут в настоящую модель (флаг -real, ANTHROPIC_API_KEY).
+	real bool
+	// extraTab: адрес фоновой вкладки, которую task откроет после изоляции.
+	extraTab string
 }
+
+// errSkip — сценарий не применим в этом режиме.
+var errSkip = fmt.Errorf("пропущен")
 
 func main() {
 	only := flag.String("run", "", "запускать только сценарии, чьё имя содержит строку")
 	headed := flag.Bool("headed", false, "показывать окно Firefox")
+	real := flag.Bool("real", false, "настоящая модель: ключ из ANTHROPIC_API_KEY, сценарии из e2e/private")
 	flag.Parse()
 
 	root, err := filepath.Abs("..")
 	must(err)
 	extDir := filepath.Join(root, "extension")
+	readExtID(extDir)
 	if _, err := os.Stat(filepath.Join(extDir, "pkg", "leash_bg.wasm")); err != nil {
 		fail("нет собранного WASM: сначала make build")
 	}
 
 	p, err := newProxy()
 	must(err)
+	if *real {
+		p.realKey = os.Getenv("ANTHROPIC_API_KEY")
+		if p.realKey == "" {
+			fail("для -real нужен ANTHROPIC_API_KEY")
+		}
+	}
 	profile, err := os.MkdirTemp("", "leash-e2e-profile")
 	must(err)
 	defer os.RemoveAll(profile)
@@ -82,16 +114,20 @@ user_pref("browser.startup.page", 0);
 		"alwaysMatch": map[string]any{"acceptInsecureCerts": true},
 	}})
 	must(err)
-	e := &env{m: m, p: p}
+	e := &env{m: m, p: p, real: *real}
 	must(e.setup(extDir))
 
-	passed, failed := 0, 0
+	passed, failed, skipped := 0, 0, 0
 	for _, s := range scenarios {
 		if *only != "" && !strings.Contains(s.name, *only) {
 			continue
 		}
 		start := time.Now()
 		err := e.runScenario(s)
+		if err == errSkip {
+			skipped++
+			continue
+		}
 		if err != nil {
 			failed++
 			fmt.Printf("FAIL %-44s %v\n", s.name, err)
@@ -100,7 +136,7 @@ user_pref("browser.startup.page", 0);
 			fmt.Printf("PASS %-44s (%.1fs)\n", s.name, time.Since(start).Seconds())
 		}
 	}
-	fmt.Printf("\nИтог: %d прошло, %d упало\n", passed, failed)
+	fmt.Printf("\nИтог: %d прошло, %d упало, %d пропущено\n", passed, failed, skipped)
 	if failed > 0 {
 		ff.Process.Kill()
 		os.Exit(1)
@@ -134,7 +170,7 @@ ExtensionPermissions.add(arguments[0], {
 	if _, err := e.m.chrome(`
 const done = arguments[arguments.length - 1];
 Services.wm.getMostRecentWindow("navigator:browser").SidebarController
-  .show("leash_localhost-sidebar-action").then(() => done("ok"), e => done("ERR " + e));`); err != nil {
+  .show(arguments[0]).then(() => done("ok"), e => done("ERR " + e));`, sidebarID); err != nil {
 		return fmt.Errorf("панель: %w", err)
 	}
 	// Панель готова, когда фон ответил ready и окно определено.
@@ -168,6 +204,10 @@ func (e *env) runScenario(s scenario) (err error) {
 			err = fmt.Errorf("паника: %v", r)
 		}
 	}()
+	// I* — сценарии настоящей модели (-real); остальные — на моке.
+	if strings.HasPrefix(s.name, "I") != e.real {
+		return errSkip
+	}
 	lookupMiss.Store("")
 	if err := s.run(e); err != nil {
 		return err
@@ -269,6 +309,24 @@ func (e *env) waitConfirm(timeout time.Duration) (string, error) {
 
 // task: новый чат, сценарий мока, вкладка на url, задача пользователя.
 func (e *env) task(url, text string, steps ...step) error {
+	// Изоляция сценариев: одна вкладка, она же активная (прошлые сценарии
+	// могли открыть новые через window.open или target=_blank).
+	if _, err := e.m.chrome(`const done = arguments[arguments.length - 1];
+const g = Services.wm.getMostRecentWindow("navigator:browser").gBrowser;
+for (const t of g.tabs.slice(1)) g.removeTab(t);
+g.selectedTab = g.tabs[0];
+done("ok");`); err != nil {
+		return err
+	}
+	if e.extraTab != "" {
+		if _, err := e.m.chrome(`const done = arguments[arguments.length - 1];
+Services.wm.getMostRecentWindow("navigator:browser").gBrowser.addTab(arguments[0], {triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()});
+done("ok");`, e.extraTab); err != nil {
+			return err
+		}
+		e.extraTab = ""
+		time.Sleep(1500 * time.Millisecond)
+	}
 	if err := e.newChat(); err != nil {
 		return err
 	}

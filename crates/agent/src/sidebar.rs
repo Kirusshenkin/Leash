@@ -238,11 +238,14 @@ fn clear_log() {
 
 fn update_controls() {
     let (ready, busy) = (READY.get(), BUSY.get());
+    // Без порта панель не ждёт: отправка сообщения подключается заново.
+    let offline = PORT.with_borrow(Option::is_none);
     UI.with_borrow(|ui| {
         if let Some(u) = ui {
-            u.input.set_disabled(!ready);
-            dom::set_disabled(&u.send, !ready || busy);
+            u.input.set_disabled(!ready && !offline);
+            dom::set_disabled(&u.send, !offline && (!ready || busy));
             let status = match (ready, busy) {
+                _ if offline => "",
                 (false, _) => "Подключение…",
                 (true, true) => "Агент работает… (Стоп или Alt+Shift+X — остановить)",
                 (true, false) => "",

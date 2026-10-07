@@ -27,3 +27,6 @@ rustc-ice-*.txt
 /extension/pkg/
 /dist/
 .DS_Store
+
+# Приватные материалы red-team (наборы промптов атак): не публикуются.
+/e2e/private/

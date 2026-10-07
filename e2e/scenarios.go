@@ -533,14 +533,7 @@ var scenarios = []scenario{
 	}},
 
 	{"S19 список вкладок не раскрывает закрытые сайты", func(e *env) error {
-		// Вторая вкладка на c (закрыт).
-		if _, err := e.m.chrome(`const done = arguments[arguments.length - 1];
-const w = Services.wm.getMostRecentWindow("navigator:browser");
-w.gBrowser.addTab("https://c.leash.test/", {triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()});
-done("ok");`); err != nil {
-			return err
-		}
-		time.Sleep(1500 * time.Millisecond)
+		e.extraTab = "https://c.leash.test/" // вторая вкладка на закрытом сайте
 		err := e.task(A+"/", "какие вкладки?", reply(tool("list_tabs", nil)), done("ок"))
 		if err != nil {
 			return err
@@ -557,11 +550,7 @@ done("ok");`); err != nil {
 			"закрытая вкладка раскрыта: %s", r.text); err != nil {
 			return err
 		}
-		_, err = e.m.chrome(`const done = arguments[arguments.length - 1];
-const g = Services.wm.getMostRecentWindow("navigator:browser").gBrowser;
-for (const t of [...g.tabs]) if (t.linkedBrowser.currentURI.spec.startsWith("https://c.")) g.removeTab(t);
-done("ok");`)
-		return err
+		return nil
 	}},
 
 	{"S20 страница не видит мир content-скрипта", func(e *env) error {
