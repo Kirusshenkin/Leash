@@ -318,7 +318,10 @@ mod tests {
         assert_eq!(list.len(), tools::definitions().len());
         // Обязательны в 2026-07-28: без них Claude Code отвергает список.
         assert!(result(&r).get("ttlMs").and_then(Value::as_f64).is_some());
-        assert_eq!(result(&r).get("cacheScope").and_then(Value::as_str), Some("public"));
+        assert_eq!(
+            result(&r).get("cacheScope").and_then(Value::as_str),
+            Some("public")
+        );
         for t in list {
             assert!(t.get("inputSchema").is_some());
             assert!(
