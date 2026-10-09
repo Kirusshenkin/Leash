@@ -66,7 +66,9 @@ func offSite(e *env, n int) error {
 	if err != nil {
 		return err
 	}
-	if !r.isError || !strings.Contains(r.text, "разрешённом") {
+	// Текст отказа зависит от того, успела ли страница увести вкладку до
+	// проверки; важно, что это отказ и данных c в нём нет.
+	if !r.isError || strings.Contains(r.text, "<page-") || strings.Contains(r.text, "C-PRIVATE") {
 		return fmt.Errorf("агент прочитал страницу после ухода на c: %s", truncate(r.text, 200))
 	}
 	return nil
