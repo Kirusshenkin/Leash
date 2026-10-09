@@ -21,7 +21,7 @@ mod settings;
 mod sidebar;
 mod stream;
 mod text;
-mod tools;
+use leash_core::tools;
 mod value;
 
 #[cfg(test)]

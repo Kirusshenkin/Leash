@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 # Версии зафиксированы точно; wasm-bindgen-cli обязан совпадать с wasm-bindgen.
 [dependencies]
+leash-core = { path = "../core", version = "=0.1.0" }
 wasm-bindgen = "=0.2.128"
 js-sys = { version = "=0.3.105", default-features = false, features = ["std"] }  # без фичи unsafe-eval: js-sys не даёт привязок к eval-подобным API
 

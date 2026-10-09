@@ -54,9 +54,14 @@ name = "leash"
 version = "0.1.0"
 dependencies = [
  "js-sys",
+ "leash-core",
  "wasm-bindgen",
  "web-sys",
 ]
+
+[[package]]
+name = "leash-core"
+version = "0.1.0"
 
 [[package]]
 name = "once_cell"

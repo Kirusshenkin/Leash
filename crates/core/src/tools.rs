@@ -2,23 +2,23 @@
 //! строго (точный набор полей, типы, диапазоны), а решение «можно ли»
 //! принимает `guard`.
 
-use crate::value::Value;
+use crate::json::Value;
 
 /// Предел номера элемента и вкладки.
 const MAX_ID: u64 = 100_000;
 /// Предел текста, который модель может ввести за один вызов.
-pub(crate) const MAX_TYPE_CHARS: usize = 2_000;
+pub const MAX_TYPE_CHARS: usize = 2_000;
 const MAX_OPTION_CHARS: usize = 200;
 const MAX_URL_CHARS: usize = 2_048;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Direction {
+pub enum Direction {
     Up,
     Down,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ToolCall {
+pub enum ToolCall {
     ReadPage,
     Click {
         element: u32,
@@ -46,13 +46,13 @@ pub(crate) enum ToolCall {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ToolError {
+pub enum ToolError {
     UnknownTool,
     BadInput(&'static str),
 }
 
 impl ToolError {
-    pub(crate) fn describe(self) -> String {
+    pub fn describe(self) -> String {
         match self {
             Self::UnknownTool => "Неизвестный инструмент.".into(),
             Self::BadInput(why) => format!("Неверные параметры: {why}."),
@@ -60,7 +60,7 @@ impl ToolError {
     }
 }
 
-pub(crate) fn parse(name: &str, input: &Value) -> Result<ToolCall, ToolError> {
+pub fn parse(name: &str, input: &Value) -> Result<ToolCall, ToolError> {
     let keys = |expected: &[&str]| {
         if input.has_exact_keys(expected) {
             Ok(())
@@ -148,7 +148,7 @@ pub(crate) fn parse(name: &str, input: &Value) -> Result<ToolCall, ToolError> {
 }
 
 /// Короткое описание вызова для журнала в панели.
-pub(crate) fn summary(call: &ToolCall) -> String {
+pub fn summary(call: &ToolCall) -> String {
     match call {
         ToolCall::ReadPage => "читаю страницу".into(),
         ToolCall::Click { element } => format!("нажать [{element}]"),
@@ -203,7 +203,7 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
 }
 
 /// Описание инструментов для API.
-pub(crate) fn definitions() -> Value {
+pub fn definitions() -> Value {
     let element = || prop("integer", "Номер элемента из последнего снимка read_page.");
     Value::Arr(vec![
         tool(
