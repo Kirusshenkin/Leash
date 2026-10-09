@@ -1,5 +1,5 @@
-// Red-team стенд Leash: настоящий Firefox, настоящее расширение, мок API в роли
-// скомпрометированной модели и атакующие страницы. Каждый сценарий — попытка
+// Red-team стенд Leash: настоящий Firefox, настоящее расширение, настоящий мост
+// (leash-host), драйвер MCP в роли скомпрометированной модели и атакующие страницы. Каждый сценарий — попытка
 // атаки; проверяется, что политика её остановила.
 //
 // Запуск: make e2e (или из каталога e2e: go run . [-run подстрока] [-headed]).
@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -21,8 +22,6 @@ import (
 
 const (
 	macFirefox = "/Applications/Firefox.app/Contents/MacOS/firefox"
-	// Фальшивый ключ собран из частей, чтобы pre-commit не принял его за настоящий.
-	testKey = "sk-ant-" + "api03-" + "e2eTESTKEYe2eTESTKEYe2eTESTKEYe2eTESTKEY0000"
 )
 
 // ID расширения и виджета его панели — из манифеста (как makeWidgetId в Firefox).
@@ -46,8 +45,12 @@ func readExtID(extDir string) {
 type env struct {
 	m *Marionette
 	p *Proxy
-	// real: запросы идут в настоящую модель (флаг -real, ANTHROPIC_API_KEY).
+	// real: сценарии I* настоящей модели (флаг -real).
 	real bool
+	// host — бинарник leash-host; home — домашний каталог стенда (сокет моста).
+	host, home string
+	// cur — идущая задача.
+	cur *run
 	// extraTab: адрес фоновой вкладки, которую task откроет после изоляции.
 	extraTab string
 }
@@ -58,7 +61,7 @@ var errSkip = fmt.Errorf("пропущен")
 func main() {
 	only := flag.String("run", "", "запускать только сценарии, чьё имя содержит строку")
 	headed := flag.Bool("headed", false, "показывать окно Firefox")
-	real := flag.Bool("real", false, "настоящая модель: ключ из ANTHROPIC_API_KEY, сценарии из e2e/private")
+	real := flag.Bool("real", false, "настоящая модель через claude -p, сценарии из e2e/private")
 	flag.Parse()
 
 	root, err := filepath.Abs("..")
@@ -69,14 +72,26 @@ func main() {
 		fail("нет собранного WASM: сначала make build")
 	}
 
+	if *real {
+		fail("-real ещё не перенесён на мост (issue #7)")
+	}
+	host := filepath.Join(root, "target", "release", "leash-host")
+	if _, err := os.Stat(host); err != nil {
+		fail("нет собранного моста: сначала make host")
+	}
+	// Свой HOME: сокет и манифест моста не задевают настоящие. Путь короткий —
+	// у адреса unix-сокета предел 104 байта.
+	home, err := os.MkdirTemp("/tmp", "lh-e2e-")
+	must(err)
+	defer os.RemoveAll(home)
+	install := exec.Command(host, "install")
+	install.Env = append(os.Environ(), "HOME="+home)
+	if out, err := install.CombinedOutput(); err != nil {
+		fail("leash-host install: " + err.Error() + "\n" + string(out))
+	}
+
 	p, err := newProxy()
 	must(err)
-	if *real {
-		p.realKey = os.Getenv("ANTHROPIC_API_KEY")
-		if p.realKey == "" {
-			fail("для -real нужен ANTHROPIC_API_KEY")
-		}
-	}
 	profile, err := os.MkdirTemp("", "leash-e2e-profile")
 	must(err)
 	defer os.RemoveAll(profile)
@@ -102,6 +117,7 @@ user_pref("browser.startup.page", 0);
 		args = append(args, "-headless")
 	}
 	ff := exec.Command(firefoxBin(), args...)
+	ff.Env = append(os.Environ(), "HOME="+home)
 	must(ff.Start())
 	defer func() {
 		ff.Process.Kill()
@@ -114,8 +130,9 @@ user_pref("browser.startup.page", 0);
 		"alwaysMatch": map[string]any{"acceptInsecureCerts": true},
 	}})
 	must(err)
-	e := &env{m: m, p: p, real: *real}
+	e := &env{m: m, p: p, real: *real, host: host, home: home}
 	must(e.setup(extDir))
+	defer e.finish()
 
 	passed, failed, skipped := 0, 0, 0
 	for _, s := range scenarios {
@@ -151,6 +168,16 @@ Cc["@mozilla.org/security/certoverride;1"].getService(Ci.nsICertOverrideService)
 done("ok");`); err != nil {
 		return fmt.Errorf("сертификаты: %w", err)
 	}
+	// Firefox ищет манифест моста только в HOME стенда (на macOS он иначе
+	// смотрит в настоящий ~/Library), до того как расширение подключится.
+	if _, err := e.m.chrome(`const done = arguments[arguments.length - 1];
+const { NativeManifests } = ChromeUtils.importESModule("resource://gre/modules/NativeManifests.sys.mjs");
+NativeManifests.init().then(() => {
+  NativeManifests._lookup = (type, name, context) => NativeManifests._tryPaths(type, name, [arguments[0]], context);
+  done("ok");
+}, e => done("ERR " + e));`, filepath.Dir(manifestDir(e.home))); err != nil {
+		return fmt.Errorf("манифесты моста: %w", err)
+	}
 	if _, err := e.m.call("Addon:Install", map[string]any{"path": extDir, "temporary": true}); err != nil {
 		return fmt.Errorf("установка: %w", err)
 	}
@@ -169,29 +196,30 @@ ExtensionPermissions.add(arguments[0], {
 	}
 	if _, err := e.m.chrome(`
 const done = arguments[arguments.length - 1];
-Services.wm.getMostRecentWindow("navigator:browser").SidebarController
+mainWin().SidebarController
   .show(arguments[0]).then(() => done("ok"), e => done("ERR " + e));`, sidebarID); err != nil {
 		return fmt.Errorf("панель: %w", err)
 	}
-	// Панель готова, когда фон ответил ready и окно определено.
+	// Готово, когда мост поздоровался: панель показывает «подключён».
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		var ready bool
-		err := e.m.sidebar(`return !w.document.getElementById("input").disabled;`, &ready)
+		err := e.m.sidebar(`return w.document.getElementById("status").classList.contains("ok");`, &ready)
 		if err == nil && ready {
 			break
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("панель не готова: %v", err)
+			var status string
+			e.m.sidebar(`return w.document.getElementById("status").textContent;`, &status)
+			return fmt.Errorf("мост не подключился: %q %v", status, err)
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
 	var granted []string
-	if err := e.m.sidebar(fmt.Sprintf(`
-await w.browser.storage.session.set({api_key: %q, api_key_hint: "0000"});
+	if err := e.m.sidebar(`
 await w.browser.storage.local.set({allow_origins: "https://a.leash.test\nhttps://b.leash.test\nhttps://c.leash.test", deny_hosts: ""});
 const all = await w.browser.permissions.getAll();
-return Array.from(all.origins);`, testKey), &granted); err != nil {
+return Array.from(all.origins);`, &granted); err != nil {
 		return fmt.Errorf("настройки: %w", err)
 	}
 	fmt.Printf("разрешения расширения: %v\n", granted)
@@ -204,7 +232,7 @@ func (e *env) runScenario(s scenario) (err error) {
 			err = fmt.Errorf("паника: %v", r)
 		}
 	}()
-	// I* — сценарии настоящей модели (-real); остальные — на моке.
+	// I* — сценарии настоящей модели (-real); остальные — на сценарии драйвера.
 	if strings.HasPrefix(s.name, "I") != e.real {
 		return errSkip
 	}
@@ -218,140 +246,10 @@ func (e *env) runScenario(s scenario) (err error) {
 	return nil
 }
 
-// --- Действия с панелью ---
-
-type logEntry struct {
-	Class string `json:"c"`
-	Text  string `json:"t"`
-}
-
-func (e *env) log() []logEntry {
-	var out []logEntry
-	e.m.sidebar(`return Array.from(w.document.getElementById("log").children)
-  .map(el => ({c: el.className, t: el.textContent}));`, &out)
-	return out
-}
-
-func (e *env) newChat() error {
-	return e.m.sidebar(`w.document.getElementById("reset").click(); return null;`, nil)
-}
-
-func (e *env) send(text string) error {
-	var ok bool
-	err := e.m.sidebar(fmt.Sprintf(`
-const input = w.document.getElementById("input");
-if (input.disabled) return false;
-input.value = %q;
-w.document.getElementById("send").click();
-return true;`, text), &ok)
-	if err == nil && !ok {
-		err = fmt.Errorf("поле ввода недоступно")
-	}
-	return err
-}
-
-func (e *env) pendingConfirm() string {
-	var text *string
-	e.m.sidebar(`const c = w.document.getElementById("confirm");
-return c.hidden ? null : w.document.getElementById("confirm-text").textContent;`, &text)
-	if text == nil {
-		return ""
-	}
-	return *text
-}
-
-func (e *env) answer(allow bool) error {
-	id := "confirm-deny"
-	if allow {
-		id = "confirm-allow"
-	}
-	return e.m.sidebar(fmt.Sprintf(`w.document.getElementById(%q).click(); return null;`, id), nil)
-}
-
-func (e *env) stop() error {
-	return e.m.sidebar(`w.document.getElementById("stop").click(); return null;`, nil)
-}
-
-// waitIdle ждёт конца задачи: в журнале появилась итоговая запись после
-// сообщения пользователя, и панель не занята.
-func (e *env) waitIdle(timeout time.Duration) ([]logEntry, error) {
-	deadline := time.Now().Add(timeout)
-	for {
-		var busy bool
-		e.m.sidebar(`return w.document.getElementById("status").textContent !== "";`, &busy)
-		log := e.log()
-		if !busy && len(log) > 0 {
-			last := log[len(log)-1]
-			if strings.Contains(last.Class, "notice") || strings.Contains(last.Class, "error") ||
-				strings.Contains(last.Class, "assistant") {
-				return log, nil
-			}
-		}
-		if time.Now().After(deadline) {
-			return log, fmt.Errorf("задача не закончилась за %v; журнал: %v", timeout, tail(log, 4))
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-}
-
-func (e *env) waitConfirm(timeout time.Duration) (string, error) {
-	deadline := time.Now().Add(timeout)
-	for {
-		if t := e.pendingConfirm(); t != "" {
-			return t, nil
-		}
-		if time.Now().After(deadline) {
-			return "", fmt.Errorf("подтверждение не появилось; журнал: %v", tail(e.log(), 4))
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-}
-
-// task: новый чат, сценарий мока, вкладка на url, задача пользователя.
-func (e *env) task(url, text string, steps ...step) error {
-	// Изоляция сценариев: одна вкладка, она же активная (прошлые сценарии
-	// могли открыть новые через window.open или target=_blank).
-	if _, err := e.m.chrome(`const done = arguments[arguments.length - 1];
-const g = Services.wm.getMostRecentWindow("navigator:browser").gBrowser;
-for (const t of g.tabs.slice(1)) g.removeTab(t);
-g.selectedTab = g.tabs[0];
-done("ok");`); err != nil {
-		return err
-	}
-	if e.extraTab != "" {
-		if _, err := e.m.chrome(`const done = arguments[arguments.length - 1];
-Services.wm.getMostRecentWindow("navigator:browser").gBrowser.addTab(arguments[0], {triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal()});
-done("ok");`, e.extraTab); err != nil {
-			return err
-		}
-		e.extraTab = ""
-		time.Sleep(1500 * time.Millisecond)
-	}
-	if err := e.newChat(); err != nil {
-		return err
-	}
-	e.p.reset(script(steps...))
-	if url != "" {
-		if err := e.m.navigate(url); err != nil {
-			return fmt.Errorf("переход на %s: %w", url, err)
-		}
-	}
-	return e.send(text)
-}
-
-// --- Сценарий мока ---
+// --- Сценарий «модели» ---
 
 // step отвечает на n-й запрос сценария; видит запрос (и снимок в нём).
 type step func(req APIRequest) Reply
-
-func script(steps ...step) func(int, APIRequest) Reply {
-	return func(n int, req APIRequest) Reply {
-		if n < len(steps) {
-			return steps[n](req)
-		}
-		return Reply{Body: final("Готово.")}
-	}
-}
 
 func reply(calls ...call) step {
 	return func(APIRequest) Reply { return Reply{Body: tools(calls...)} }
@@ -433,4 +331,13 @@ func firefoxBin() string {
 		return p
 	}
 	return macFirefox
+}
+
+// manifestDir — каталог манифестов native messaging Firefox в home (как
+// paths::manifest_dir в leash-host).
+func manifestDir(home string) string {
+	if runtime.GOOS == "darwin" {
+		return filepath.Join(home, "Library", "Application Support", "Mozilla", "NativeMessagingHosts")
+	}
+	return filepath.Join(home, ".mozilla", "native-messaging-hosts")
 }

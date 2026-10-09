@@ -104,6 +104,16 @@ func (m *Marionette) context(ctx string) error {
 	return err
 }
 
+// mainWinJS: главное окно браузера, а не окно подтверждения Leash (у того
+// скрыта панель инструментов). Доступна в каждом chrome-скрипте как mainWin().
+const mainWinJS = `const mainWin = () => {
+  for (const w of Services.wm.getEnumerator("navigator:browser")) {
+    if (!(w.document.documentElement.getAttribute("chromehidden") || "").includes("toolbar")) return w;
+  }
+  return Services.wm.getMostRecentWindow("navigator:browser");
+};
+`
+
 // chrome исполняет асинхронный скрипт с привилегиями браузера.
 // Последний аргумент скрипта — функция завершения.
 func (m *Marionette) chrome(script string, args ...any) (json.RawMessage, error) {
@@ -113,16 +123,12 @@ func (m *Marionette) chrome(script string, args ...any) (json.RawMessage, error)
 	if args == nil {
 		args = []any{}
 	}
-	return m.call("WebDriver:ExecuteAsyncScript", map[string]any{"script": script, "args": args})
+	return m.call("WebDriver:ExecuteAsyncScript", map[string]any{"script": mainWinJS + script, "args": args})
 }
 
-const sidebarScript = `
-const [code, tag] = arguments;
-const done = arguments[arguments.length - 1];
-const win = Services.wm.getMostRecentWindow("navigator:browser");
-const outer = win.SidebarController.browser;
-const inner = outer.contentDocument && outer.contentDocument.getElementById("webext-panels-browser");
-if (!inner || !inner.messageManager) { done({err: "панель не открыта"}); return; }
+// frameRun: исполнить code в странице браузера inner (frame-скрипт) и вернуть
+// результат. Общая часть для панели и окна подтверждения.
+const frameRun = `
 const mm = inner.messageManager;
 mm.addMessageListener(tag, function l(msg) { mm.removeMessageListener(tag, l); done(msg.data); });
 const fs = "Promise.resolve().then(() => (async function (w) {" + code + "})(content.wrappedJSObject))" +
@@ -130,6 +136,54 @@ const fs = "Promise.resolve().then(() => (async function (w) {" + code + "})(con
   ".catch(e => sendAsyncMessage(" + JSON.stringify(tag) + ", {err: String(e)}))";
 mm.loadFrameScript("data:application/javascript;charset=utf-8," + encodeURIComponent(fs), false);
 `
+
+const sidebarScript = `
+const [code, tag] = arguments;
+const done = arguments[arguments.length - 1];
+const win = mainWin();
+const outer = win.SidebarController.browser;
+const inner = outer.contentDocument && outer.contentDocument.getElementById("webext-panels-browser");
+if (!inner || !inner.messageManager) { done({err: "панель не открыта"}); return; }
+` + frameRun
+
+// popupScript: то же для окна подтверждения Leash; нет окна — {none: true}.
+const popupScript = `
+const [code, tag] = arguments;
+const done = arguments[arguments.length - 1];
+let inner = null;
+for (const w of Services.wm.getEnumerator("navigator:browser")) {
+  const b = w.gBrowser && w.gBrowser.selectedBrowser;
+  if (b && b.currentURI.spec.includes("/confirm/confirm.html") && b.messageManager) inner = b;
+}
+if (!inner) { done({none: true}); return; }
+` + frameRun
+
+// popup — как sidebar, но в окне подтверждения. found=false: окна нет.
+func (m *Marionette) popup(code string, out any) (found bool, err error) {
+	m.tag++
+	raw, err := m.chrome(popupScript, code, fmt.Sprintf("leash-e2e-%d", m.tag))
+	if err != nil {
+		return false, err
+	}
+	var res struct {
+		Ok   *string `json:"ok"`
+		Err  *string `json:"err"`
+		None bool    `json:"none"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return false, fmt.Errorf("окно подтверждения: %s", raw)
+	}
+	if res.None {
+		return false, nil
+	}
+	if res.Err != nil {
+		return true, fmt.Errorf("окно подтверждения: %s", *res.Err)
+	}
+	if out != nil && res.Ok != nil {
+		return true, json.Unmarshal([]byte(*res.Ok), out)
+	}
+	return true, nil
+}
 
 // sidebar исполняет тело async-функции с аргументом w — окном панели
 // (window, видимый ей самой) и возвращает результат через JSON.

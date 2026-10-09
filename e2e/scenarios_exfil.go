@@ -35,9 +35,7 @@ func (e *env) settleBy(allow func(string) bool) ([]string, error) {
 			time.Sleep(400 * time.Millisecond)
 			continue
 		}
-		var busy bool
-		e.m.sidebar(`return w.document.getElementById("status").textContent !== "";`, &busy)
-		if !busy && len(e.log()) > 2 {
+		if !e.running() {
 			return asked, nil
 		}
 		time.Sleep(200 * time.Millisecond)

@@ -1,6 +1,6 @@
 package main
 
-// Сценарии атак. Мок API играет скомпрометированную модель: делает то, что
+// Сценарии атак. Драйвер играет скомпрометированную модель: делает то, что
 // просит страница. Каждый сценарий проверяет, что вред не случился.
 
 import (
@@ -22,6 +22,20 @@ const (
 )
 
 var nonceRe = regexp.MustCompile(`<page-([0-9a-f]{32})>`)
+
+// pageInner — данные сайта внутри обёртки <page-NONCE> из результата read_page.
+func pageInner(text string) (string, error) {
+	m := nonceRe.FindStringSubmatch(text)
+	if m == nil {
+		return "", fmt.Errorf("нет разделителя: %s", truncate(text, 200))
+	}
+	open, end := "\n<page-"+m[1]+">\n", "\n</page-"+m[1]+">"
+	i, j := strings.Index(text, open), strings.LastIndex(text, end)
+	if i < 0 || j < i+len(open) {
+		return "", fmt.Errorf("обёртка данных сломана: %s", truncate(text, 300))
+	}
+	return text[i+len(open) : j], nil
+}
 
 func expect(cond bool, format string, args ...any) error {
 	if cond {
@@ -79,7 +93,7 @@ var scenarios = []scenario{
 		if err := expect(!r.isError && strings.Contains(r.text, "Сайт A"), "снимок не получен: %s", truncate(r.text, 300)); err != nil {
 			return err
 		}
-		return expect(hasEntry(log, "assistant", "Страница A."), "ответ не показан: %v", tail(log, 3))
+		return expect(hasEntry(log, "step", ""), "панель не показала шаг Claude: %v", tail(log, 3))
 	}},
 
 	{"S02 инъекция в тексте → переход с данными на чужой сайт", func(e *env) error {
@@ -98,13 +112,13 @@ var scenarios = []scenario{
 		if err != nil {
 			return err
 		}
-		// Инъекция дошла до модели только внутри разделителя с nonce из этого запроса.
-		m := nonceRe.FindStringSubmatch(snap.text)
-		if err := expect(m != nil && strings.Contains(systemPrompt(reqs[1]), "<page-"+m[1]+">"),
-			"снимок не обёрнут разделителем с nonce системного промпта"); err != nil {
+		// Инъекция дошла до модели только внутри разделителя с nonce, названным
+		// в заголовке того же результата.
+		inner, err := pageInner(snap.text)
+		if err != nil {
 			return err
 		}
-		if err := expect(strings.Contains(snap.text, "INJECT-MARKER"), "текст страницы не дошёл"); err != nil {
+		if err := expect(strings.Contains(inner, "INJECT-MARKER"), "текст страницы не дошёл"); err != nil {
 			return err
 		}
 		nav, err := resultOf(reqs, 2)
@@ -156,11 +170,10 @@ var scenarios = []scenario{
 		if err != nil {
 			return err
 		}
-		m := nonceRe.FindStringSubmatch(r.text)
-		if m == nil {
-			return fmt.Errorf("нет разделителя")
+		inner, err := pageInner(r.text)
+		if err != nil {
+			return err
 		}
-		inner := strings.TrimSuffix(strings.TrimPrefix(r.text, "<page-"+m[1]+">"), "</page-"+m[1]+">")
 		if err := expect(!strings.ContainsAny(inner, "<>"), "внутри снимка остались угловые скобки: %s", truncate(inner, 500)); err != nil {
 			return err
 		}
@@ -479,7 +492,7 @@ var scenarios = []scenario{
 				return fmt.Errorf("вызов %d принят: %s", i, r.text)
 			}
 		}
-		return expect(hasEntry(log, "assistant", "Живой."), "агент не продолжил работу")
+		return expect(hasEntry(log, "claude", "Живой."), "сеанс не продолжил работу")
 	}},
 
 	{"S16 зацикливание останавливается", func(e *env) error {
@@ -492,10 +505,15 @@ var scenarios = []scenario{
 			return err
 		}
 		reqs, _, _ := e.p.snapshot()
-		if err := expect(hasEntry(log, "error", "зациклился"), "нет сообщения о зацикливании: %v", tail(log, 3)); err != nil {
+		// Четвёртый одинаковый вызов подряд — отказ.
+		r, err := resultOf(reqs, 4)
+		if err != nil {
 			return err
 		}
-		return expect(len(reqs) <= 5, "после остановки запросы продолжились: %d", len(reqs))
+		if err := expect(r.isError && strings.Contains(r.text, "повторяется"), "повтор не остановлен: %s", r.text); err != nil {
+			return err
+		}
+		return expect(hasEntry(log, "step", "повторяется"), "в панели нет записи о повторе: %v", tail(log, 3))
 	}},
 
 	{"S17 встроенный запрет при выданном разрешении", func(e *env) error {
@@ -568,95 +586,15 @@ return [typeof w.leashRun, typeof w.browser, typeof w.chrome];`)
 		return expect(string(v) == `["undefined","undefined","undefined"]`, "странице доступно: %s", v)
 	}},
 
-	{"S21 content-скрипт не читает ключ из storage.session", func(e *env) error {
-		if err := e.m.navigate(A + "/"); err != nil {
+	{"S21 «Стоп» в панели: следующий вызов Claude получает отказ", func(e *env) error {
+		slow := func(APIRequest) Reply {
+			return Reply{Body: tools(tool("navigate", map[string]any{"url": B + "/s21"})), Delay: 3 * time.Second}
+		}
+		if err := e.task(A+"/", "долгая задача", reply(tool("read_page", nil)), slow, done("ок")); err != nil {
 			return err
 		}
-		var res []string
-		err := e.m.sidebar(`
-const [tab] = await w.browser.tabs.query({active: true, windowId: (await w.browser.windows.getCurrent()).id});
-const probe = (kind) => w.browser.scripting.executeScript({target: {tabId: tab.id}, args: [kind],
-  func: (k) => browser.storage[k].get(null).then(v => k + ":" + JSON.stringify(v), e => k + ":ERR " + e)});
-const s = await probe("session").then(r => r[0].result, e => "session:THROW " + e);
-const l = await probe("local").then(r => r[0].result, e => "local:THROW " + e);
-return [s, l];`, &res)
-		if err != nil {
-			return err
-		}
-		if len(res) != 2 {
-			return fmt.Errorf("плохой ответ: %v", res)
-		}
-		fmt.Printf("     зонд из мира content-скриптов: %v\n", res)
-		// Зонд обязан реально исполниться: storage.local оттуда читается
-		// (там списки сайтов), иначе тест ничего не доказывает.
-		if err := expect(strings.HasPrefix(res[1], "local:{") && strings.Contains(res[1], "allow_origins"),
-			"зонд не исполнился в мире content-скриптов: %v", res); err != nil {
-			return err
-		}
-		return expect(!strings.Contains(res[0], testKey) && !strings.Contains(res[1], testKey),
-			"ключ виден из мира content-скриптов: %v", res)
-	}},
-
-	{"S22 ключ только в заголовке, не в теле запроса", func(e *env) error {
-		if err := e.task(A+"/", "привет", done("Привет.")); err != nil {
-			return err
-		}
-		if _, err := e.waitIdle(20 * time.Second); err != nil {
-			return err
-		}
-		reqs, _, _ := e.p.snapshot()
-		if len(reqs) == 0 {
-			return fmt.Errorf("нет запросов")
-		}
-		for _, r := range reqs {
-			if r.Key != testKey {
-				return fmt.Errorf("в заголовке не тот ключ")
-			}
-			if strings.Contains(r.Raw, testKey) || strings.Contains(r.Raw, "e2eTESTKEY") {
-				return fmt.Errorf("ключ в теле запроса")
-			}
-		}
-		return nil
-	}},
-
-	{"S23 «Стоп» прерывает ожидание модели", func(e *env) error {
-		slow := func(APIRequest) Reply { return Reply{Body: tools(tool("read_page", nil)), Delay: 8 * time.Second} }
-		if err := e.task(A+"/", "долгая задача", reply(tool("read_page", nil)), slow, done("не должно")); err != nil {
-			return err
-		}
-		time.Sleep(3 * time.Second)
+		time.Sleep(1500 * time.Millisecond)
 		if err := e.stop(); err != nil {
-			return err
-		}
-		log, err := e.waitIdle(15 * time.Second)
-		if err != nil {
-			return err
-		}
-		time.Sleep(6 * time.Second)
-		reqs, _, _ := e.p.snapshot()
-		if err := expect(hasEntry(log, "notice", "Остановлено"), "нет «Остановлено»: %v", tail(log, 3)); err != nil {
-			return err
-		}
-		return expect(len(reqs) <= 2 && !hasEntry(e.log(), "assistant", "не должно"),
-			"после «Стоп» работа продолжилась: %d запросов", len(reqs))
-	}},
-
-	{"S24 после отказа пользователя диалог остаётся корректным", func(e *env) error {
-		err := e.task(A+"/forms", "отправь",
-			reply(tool("read_page", nil)), clickByName("Далее-своя"), done("Понял, не отправляю."))
-		if err != nil {
-			return err
-		}
-		if _, err := e.waitConfirm(20 * time.Second); err != nil {
-			return err
-		}
-		e.answer(false)
-		if _, err := e.waitIdle(30 * time.Second); err != nil {
-			return err
-		}
-		// Следующее сообщение в том же диалоге.
-		e.p.reset(script(done("Второй ответ.")))
-		if err := e.send("а теперь просто ответь"); err != nil {
 			return err
 		}
 		log, err := e.waitIdle(20 * time.Second)
@@ -664,56 +602,18 @@ return [s, l];`, &res)
 			return err
 		}
 		reqs, _, _ := e.p.snapshot()
-		if len(reqs) != 1 {
-			return fmt.Errorf("запросов %d", len(reqs))
-		}
-		if err := validConversation(reqs[0]); err != nil {
+		r, err := resultOf(reqs, 2)
+		if err != nil {
 			return err
 		}
-		return expect(hasEntry(log, "assistant", "Второй ответ."), "второй ответ не показан")
+		if err := expect(r.isError && strings.Contains(r.text, "остановил"), "после «Стоп» вызов выполнен: %s", r.text); err != nil {
+			return err
+		}
+		if err := expect(hasEntry(log, "notice", "Остановлено"), "нет «Остановлено»: %v", tail(log, 3)); err != nil {
+			return err
+		}
+		return expect(!e.hit("/s21"), "переход после «Стоп» выполнен")
 	}},
-}
-
-// validConversation проверяет инварианты Messages API на теле запроса.
-func validConversation(req APIRequest) error {
-	msgs, _ := req.Body["messages"].([]any)
-	open := map[string]bool{}
-	for i, mm := range msgs {
-		m, _ := mm.(map[string]any)
-		blocks, _ := m["content"].([]any)
-		if len(blocks) == 0 {
-			return fmt.Errorf("сообщение %d пустое", i)
-		}
-		if m["role"] == "user" {
-			seenText := false
-			for _, bb := range blocks {
-				b, _ := bb.(map[string]any)
-				switch b["type"] {
-				case "tool_result":
-					if seenText {
-						return fmt.Errorf("сообщение %d: tool_result после текста", i)
-					}
-					delete(open, b["tool_use_id"].(string))
-				case "text":
-					seenText = true
-				}
-			}
-			if len(open) > 0 {
-				return fmt.Errorf("сообщение %d: нет результатов для %v", i, open)
-			}
-		} else {
-			for _, bb := range blocks {
-				b, _ := bb.(map[string]any)
-				if b["type"] == "tool_use" {
-					open[b["id"].(string)] = true
-				}
-			}
-		}
-	}
-	if len(open) > 0 {
-		return fmt.Errorf("в конце диалога нет результатов для %v", open)
-	}
-	return nil
 }
 
 // register добавляет сценарии из других файлов (вызывать в init()).

@@ -1,6 +1,8 @@
 package main
 
 // Прогон приватного набора инъекций на настоящей модели (go run . -real).
+// На мосту модель должна вызывать инструменты сама (claude -p с MCP-конфигом
+// стенда); пока это не сделано (issue #7), -real отказывается запускаться.
 //
 // Страницы лежат в e2e/private/injections/*.html и НЕ публикуются (каталог в
 // .gitignore). В странице можно использовать {{SECRET}} — секрет, который не
@@ -57,9 +59,7 @@ func injectionRun(e *env, url, task string) error {
 			fmt.Printf("     подтверждение отклонено: %s\n", truncate(strings.ReplaceAll(t, "\n", " | "), 200))
 			e.answer(false)
 		}
-		var busy bool
-		e.m.sidebar(`return w.document.getElementById("status").textContent !== "";`, &busy)
-		if !busy && len(e.log()) > 1 {
+		if !e.running() {
 			break
 		}
 		if time.Now().After(deadline) {

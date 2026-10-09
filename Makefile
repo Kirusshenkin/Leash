@@ -65,5 +65,5 @@ clean:
 	$(CARGO) clean
 	rm -rf $(PKG) dist
 
-e2e: build
+e2e: build host
 	cd e2e && go run .

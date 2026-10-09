@@ -2,7 +2,8 @@ package main
 
 // HTTPS-прокси для профиля Firefox: на CONNECT отвечает сам, завершает TLS
 // своим сертификатом (Firefox принимает его по acceptInsecureCerts) и
-// обслуживает мок Anthropic API и тестовые сайты. Наружу не ходит ничего.
+// обслуживает тестовые сайты. Наружу не ходит ничего: любой запрос на
+// закрытый сайт виден в журнале как утечка.
 
 import (
 	"bufio"
@@ -12,7 +13,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/json"
 	"io"
 	"math/big"
 	"net"
@@ -22,12 +22,11 @@ import (
 	"time"
 )
 
-// APIRequest — запрос расширения к API; Resp — что ответили (мок или модель).
+// APIRequest — шаг сценария глазами «модели»: результаты вызовов
+// предыдущего шага (как их вернул мост) и что «модель» ответила на них.
 type APIRequest struct {
-	Key  string
-	Body map[string]any
-	Raw  string
-	Resp map[string]any
+	Results []result
+	Resp    map[string]any
 }
 
 // Post — запрос на тестовый сайт не методом GET (отправка формы и т.п.).
@@ -35,17 +34,11 @@ type Post struct {
 	Host, Path, Body string
 }
 
-// Reply — ответ мока: тело Messages API, задержка перед ним и HTTP-статус
-// (0 — 200). Для ошибок API тело — {"type":"error","error":{...}}.
-// На запрос со "stream": true успешное тело уходит потоком SSE; Stream, если
-// задан, отправляется вместо него как есть (порченый или оборванный поток).
+// Reply — ход «модели»: вызовы инструментов (tools) или конец (final).
+// Delay — пауза перед вызовами (страница успевает измениться после снимка).
 type Reply struct {
-	Body   map[string]any
-	Delay  time.Duration
-	Status int
-	Stream string
-	// Pause: поток уходит по событию с этой паузой между ними.
-	Pause time.Duration
+	Body  map[string]any
+	Delay time.Duration
 }
 
 type Proxy struct {
@@ -53,15 +46,12 @@ type Proxy struct {
 	requests []APIRequest
 	posts    []Post
 	hits     []string
-	script   func(n int, req APIRequest) Reply
-	// realKey: не пусто — запросы уходят в настоящий API с этим ключом.
-	realKey string
-	ln      net.Listener
-	tls     *tls.Config
+	ln       net.Listener
+	tls      *tls.Config
 }
 
 func newProxy() (*Proxy, error) {
-	cert, err := selfSigned([]string{"api.anthropic.com", "a.leash.test", "b.leash.test", "c.leash.test", "www.tbank.ru"})
+	cert, err := selfSigned([]string{"a.leash.test", "b.leash.test", "c.leash.test", "www.tbank.ru"})
 	if err != nil {
 		return nil, err
 	}
@@ -120,10 +110,6 @@ func (p *Proxy) route(w *response, r *http.Request) {
 	p.mu.Lock()
 	p.hits = append(p.hits, r.Method+" https://"+host+r.URL.RequestURI())
 	p.mu.Unlock()
-	if host == "api.anthropic.com" {
-		p.api(w, r, body)
-		return
-	}
 	if r.Method != http.MethodGet {
 		p.mu.Lock()
 		p.posts = append(p.posts, Post{Host: host, Path: r.URL.Path, Body: string(body)})
@@ -147,120 +133,20 @@ func (p *Proxy) route(w *response, r *http.Request) {
 	w.body.WriteString(html)
 }
 
-func (p *Proxy) api(w *response, r *http.Request, body []byte) {
-	w.header.Set("Access-Control-Allow-Origin", "*")
-	if r.Method == http.MethodOptions {
-		w.header.Set("Access-Control-Allow-Methods", "POST")
-		w.header.Set("Access-Control-Allow-Headers", "content-type, x-api-key, anthropic-version, anthropic-dangerous-direct-browser-access")
-		w.status = 204
-		return
-	}
-	var parsed map[string]any
-	if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" || json.Unmarshal(body, &parsed) != nil {
-		w.status = 400
-		return
-	}
-	req := APIRequest{Key: r.Header.Get("x-api-key"), Body: parsed, Raw: string(body)}
-	p.mu.Lock()
-	n := len(p.requests)
-	p.requests = append(p.requests, req)
-	script := p.script
-	p.mu.Unlock()
-	reply := Reply{Body: final("нет сценария")}
-	if p.realKey != "" {
-		reply = forward(body, p.realKey)
-	} else if script != nil {
-		reply = script(n, req)
-	}
-	p.mu.Lock()
-	p.requests[n].Resp = reply.Body
-	p.mu.Unlock()
-	time.Sleep(reply.Delay)
-	if reply.Status != 0 {
-		w.status = reply.Status
-	}
-	if stream, _ := parsed["stream"].(bool); stream && w.status == 200 {
-		w.header.Set("Content-Type", "text/event-stream; charset=utf-8")
-		s := reply.Stream
-		if s == "" {
-			s = sse(reply.Body)
-		}
-		if reply.Pause > 0 {
-			w.pause = reply.Pause
-			for _, ev := range strings.SplitAfter(s, "\n\n") {
-				if ev != "" {
-					w.parts = append(w.parts, ev)
-				}
-			}
-			return
-		}
-		w.body.WriteString(s)
-		return
-	}
-	w.header.Set("Content-Type", "application/json")
-	json.NewEncoder(&w.body).Encode(reply.Body)
-}
-
-// sse раскладывает готовое сообщение на события потока, как это делает API:
-// текст и JSON аргументов приходят несколькими дельтами.
-func sse(msg map[string]any) string {
-	var b strings.Builder
-	ev := func(kind string, data map[string]any) {
-		data["type"] = kind
-		j, _ := json.Marshal(data)
-		b.WriteString("event: " + kind + "\ndata: " + string(j) + "\n\n")
-	}
-	usage, _ := msg["usage"].(map[string]any)
-	ev("message_start", map[string]any{"message": map[string]any{
-		"id": "msg_e2e", "type": "message", "role": "assistant", "content": []any{},
-		"model": "e2e", "stop_reason": nil, "usage": map[string]any{"input_tokens": usage["input_tokens"], "output_tokens": 1},
-	}})
-	ev("ping", map[string]any{})
-	blocks, _ := msg["content"].([]any)
-	for i, raw := range blocks {
-		block, _ := raw.(map[string]any)
-		switch block["type"] {
-		case "text":
-			text, _ := block["text"].(string)
-			ev("content_block_start", map[string]any{"index": i, "content_block": map[string]any{"type": "text", "text": ""}})
-			for _, part := range halves(text) {
-				ev("content_block_delta", map[string]any{"index": i, "delta": map[string]any{"type": "text_delta", "text": part}})
-			}
-		case "tool_use":
-			ev("content_block_start", map[string]any{"index": i, "content_block": map[string]any{
-				"type": "tool_use", "id": block["id"], "name": block["name"], "input": map[string]any{}}})
-			input, _ := json.Marshal(block["input"])
-			for _, part := range halves(string(input)) {
-				ev("content_block_delta", map[string]any{"index": i, "delta": map[string]any{"type": "input_json_delta", "partial_json": part}})
-			}
-		default:
-			ev("content_block_start", map[string]any{"index": i, "content_block": block})
-		}
-		ev("content_block_stop", map[string]any{"index": i})
-	}
-	ev("message_delta", map[string]any{"delta": map[string]any{"stop_reason": msg["stop_reason"]},
-		"usage": map[string]any{"output_tokens": usage["output_tokens"]}})
-	ev("message_stop", map[string]any{})
-	return b.String()
-}
-
-// halves делит строку на две части по границе символа.
-func halves(s string) []string {
-	r := []rune(s)
-	if len(r) < 2 {
-		return []string{s}
-	}
-	return []string{string(r[:len(r)/2]), string(r[len(r)/2:])}
-}
-
-// reset начинает сценарий: новый скрипт мока, пустые журналы.
-func (p *Proxy) reset(script func(n int, req APIRequest) Reply) {
+// reset начинает сценарий: пустые журналы.
+func (p *Proxy) reset() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.script = script
 	p.requests = nil
 	p.posts = nil
 	p.hits = nil
+}
+
+// record добавляет шаг сценария.
+func (p *Proxy) record(req APIRequest) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.requests = append(p.requests, req)
 }
 
 func (p *Proxy) snapshot() ([]APIRequest, []Post, []string) {
@@ -273,22 +159,11 @@ type response struct {
 	status int
 	header http.Header
 	body   strings.Builder
-	// parts: тело по частям (chunked) с паузой перед каждой, кроме первой.
-	parts []string
-	pause time.Duration
 }
 
 func newResponse() *response { return &response{status: 200, header: http.Header{}} }
 
 func (r *response) writeTo(w io.Writer) error {
-	if r.parts != nil {
-		resp := http.Response{
-			StatusCode: r.status, ProtoMajor: 1, ProtoMinor: 1, Header: r.header,
-			TransferEncoding: []string{"chunked"}, ContentLength: -1,
-			Body: io.NopCloser(&slowReader{parts: r.parts, pause: r.pause}),
-		}
-		return resp.Write(w)
-	}
 	resp := http.Response{
 		StatusCode:    r.status,
 		ProtoMajor:    1,
@@ -321,7 +196,7 @@ func selfSigned(hosts []string) (tls.Certificate, error) {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, nil
 }
 
-// --- Ответы Messages API ---
+// --- Ходы «модели» ---
 
 type call struct {
 	name  string
@@ -335,117 +210,43 @@ func tool(name string, input map[string]any) call {
 	return call{name, input}
 }
 
-var toolSeq int
-
+// tools — ход с вызовами инструментов (в форме ответа Messages API, чтобы
+// сценарии читались как раньше).
 func tools(calls ...call) map[string]any {
 	content := []any{}
 	for _, c := range calls {
-		toolSeq++
-		content = append(content, map[string]any{
-			"type": "tool_use", "id": "toolu_e2e_" + strconvItoa(toolSeq), "name": c.name, "input": c.input,
-		})
+		content = append(content, map[string]any{"type": "tool_use", "name": c.name, "input": c.input})
 	}
-	return map[string]any{
-		"type": "message", "role": "assistant", "content": content, "stop_reason": "tool_use",
-		"usage": map[string]any{"input_tokens": 10, "output_tokens": 5},
-	}
+	return map[string]any{"content": content, "stop_reason": "tool_use"}
 }
 
 func final(text string) map[string]any {
 	return map[string]any{
-		"type": "message", "role": "assistant",
 		"content":     []any{map[string]any{"type": "text", "text": text}},
 		"stop_reason": "end_turn",
-		"usage":       map[string]any{"input_tokens": 10, "output_tokens": 5},
 	}
 }
 
-func strconvItoa(n int) string { return big.NewInt(int64(n)).String() }
+// callsOf — вызовы из хода «модели».
+func callsOf(body map[string]any) []call {
+	content, _ := body["content"].([]any)
+	var out []call
+	for _, b := range content {
+		m, _ := b.(map[string]any)
+		if m["type"] != "tool_use" {
+			continue
+		}
+		name, _ := m["name"].(string)
+		input, _ := m["input"].(map[string]any)
+		out = append(out, tool(name, input))
+	}
+	return out
+}
 
-// toolResults — результаты инструментов из последней реплики пользователя.
+// result — ответ моста на один вызов.
 type result struct {
 	text    string
 	isError bool
 }
 
-func lastResults(req APIRequest) []result {
-	msgs, _ := req.Body["messages"].([]any)
-	if len(msgs) == 0 {
-		return nil
-	}
-	last, _ := msgs[len(msgs)-1].(map[string]any)
-	blocks, _ := last["content"].([]any)
-	var out []result
-	for _, b := range blocks {
-		m, _ := b.(map[string]any)
-		if m["type"] != "tool_result" {
-			continue
-		}
-		text, _ := m["content"].(string)
-		isErr, _ := m["is_error"].(bool)
-		out = append(out, result{text, isErr})
-	}
-	return out
-}
-
-func systemPrompt(req APIRequest) string {
-	s, _ := req.Body["system"].(string)
-	return s
-}
-
-// forward отправляет тело запроса расширения в настоящий Messages API с
-// ключом из окружения (ключ расширения в стенде фальшивый).
-func forward(body []byte, key string) Reply {
-	// Ответ нужен целиком для журнала; поток мок соберёт сам.
-	var parsed map[string]any
-	if json.Unmarshal(body, &parsed) != nil {
-		return Reply{Status: 400, Body: apiError("invalid_request_error")}
-	}
-	delete(parsed, "stream")
-	body, _ = json.Marshal(parsed)
-	req, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", strings.NewReader(string(body)))
-	if err != nil {
-		return Reply{Status: 500, Body: apiError("api_error")}
-	}
-	req.Header.Set("content-type", "application/json")
-	req.Header.Set("anthropic-version", "2023-06-01")
-	req.Header.Set("x-api-key", key)
-	client := &http.Client{Timeout: 170 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return Reply{Status: 502, Body: apiError("api_error")}
-	}
-	defer resp.Body.Close()
-	var out map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return Reply{Status: 502, Body: apiError("api_error")}
-	}
-	return Reply{Status: resp.StatusCode, Body: out}
-}
-
-func apiError(kind string) map[string]any {
-	return map[string]any{"type": "error", "error": map[string]any{"type": kind, "message": "e2e"}}
-}
-
-// slowReader отдаёт части по одной за Read, с паузой перед каждой следующей.
-type slowReader struct {
-	parts []string
-	pause time.Duration
-	sent  int
-}
-
-func (s *slowReader) Read(p []byte) (int, error) {
-	if len(s.parts) == 0 {
-		return 0, io.EOF
-	}
-	if s.sent > 0 {
-		time.Sleep(s.pause)
-	}
-	n := copy(p, s.parts[0])
-	s.parts[0] = s.parts[0][n:]
-	if s.parts[0] == "" {
-		s.parts = s.parts[1:]
-		s.sent++
-	}
-	return n, nil
-}
+func lastResults(req APIRequest) []result { return req.Results }
