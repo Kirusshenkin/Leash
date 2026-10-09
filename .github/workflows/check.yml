@@ -1,5 +1,5 @@
-# Те же проверки, что make check и make e2e локально, плюс поиск ключей API
-# во всей истории (хук pre-commit на свежем клоне выключен).
+# Те же проверки, что make check и make e2e локально (e2e — с настоящим мостом),
+# плюс поиск ключей API во всей истории (хук pre-commit на свежем клоне выключен).
 name: check
 
 on:
@@ -65,5 +65,5 @@ jobs:
         run: |
           test -z "$(gofmt -l e2e)" || { gofmt -l e2e; exit 1; }
           go -C e2e vet .
-      # Сценарии I требуют e2e/private и ключа — в CI их нет, они пропускаются.
+      # Сценарии I требуют e2e/private и настоящей модели — в CI их нет.
       - run: firefox --version && make e2e

@@ -13,7 +13,7 @@ VERSION := $(shell sed -n 's/.*"version": "\([0-9.]*\)".*/\1/p' extension/manife
 # wasm-bindgen-cli обязан совпадать с версией крейта из Cargo.lock.
 BINDGEN_VERSION := $(shell grep -A1 '^name = "wasm-bindgen"$$' Cargo.lock | sed -n 's/version = "\(.*\)"/\1/p')
 
-.PHONY: all build host test lint static deny audit check zip source hooks clean e2e
+.PHONY: all build host install test lint static deny audit check zip source hooks clean e2e
 
 all: check
 
@@ -25,6 +25,10 @@ build:
 
 host:
 	$(CARGO) build --locked --offline --release -p leash-host
+
+# Мост для текущего пользователя: бинарник в ~/.local/bin и манифест для Firefox.
+install: host
+	sh scripts/install.sh
 
 test:
 	$(CARGO) test --locked --offline
@@ -48,8 +52,8 @@ check: lint test static deny audit
 zip: check
 	mkdir -p dist
 	rm -f dist/leash-$(VERSION).zip
-	cd extension && zip -r -X ../dist/leash-$(VERSION).zip manifest.json ui.css background sidebar options content icons pkg
-	@for f in manifest.json background/background.js content/content.js sidebar/sidebar.html options/options.html pkg/leash_bg.wasm; do \
+	cd extension && zip -r -X ../dist/leash-$(VERSION).zip manifest.json ui.css background sidebar options confirm content icons pkg
+	@for f in manifest.json background/background.js content/content.js sidebar/sidebar.html options/options.html confirm/confirm.html confirm/confirm.js pkg/leash_bg.wasm; do \
 		unzip -l dist/leash-$(VERSION).zip | grep -q " $$f$$" || { echo "в архиве нет $$f"; exit 1; }; \
 	done
 
