@@ -15,6 +15,9 @@ import (
 	"time"
 )
 
+// mcpVersion — ревизия MCP, которой пользуется Claude Code.
+const mcpVersion = "2026-07-28"
+
 type mcpClient struct {
 	cmd *exec.Cmd
 	in  io.WriteCloser
@@ -40,17 +43,28 @@ func startMCP(host, home string) (*mcpClient, error) {
 		return nil, err
 	}
 	c := &mcpClient{cmd: cmd, in: in, out: bufio.NewReaderSize(out, 1<<20)}
-	if _, err := c.request("initialize", map[string]any{
-		"protocolVersion": "2025-11-25",
-		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]any{"name": "leash-e2e", "version": "0"},
-	}); err != nil {
+	// Как Claude Code: новая ревизия без initialize, версия в _meta каждого
+	// запроса. Список инструментов проверяется по тем же обязательным полям,
+	// без которых Claude Code его отбрасывает.
+	if _, err := c.request("server/discover", map[string]any{}); err != nil {
 		c.close()
-		return nil, fmt.Errorf("initialize: %w", err)
+		return nil, fmt.Errorf("server/discover: %w", err)
 	}
-	if err := c.send(map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"}); err != nil {
+	raw, err := c.request("tools/list", map[string]any{})
+	if err != nil {
 		c.close()
-		return nil, err
+		return nil, fmt.Errorf("tools/list: %w", err)
+	}
+	var list struct {
+		ResultType string           `json:"resultType"`
+		Tools      []map[string]any `json:"tools"`
+		TTL        *float64         `json:"ttlMs"`
+		CacheScope string           `json:"cacheScope"`
+	}
+	if json.Unmarshal(raw, &list) != nil || list.ResultType != "complete" || len(list.Tools) == 0 ||
+		list.TTL == nil || (list.CacheScope != "public" && list.CacheScope != "private") {
+		c.close()
+		return nil, fmt.Errorf("tools/list не по ревизии %s: %s", mcpVersion, truncate(string(raw), 200))
 	}
 	return c, nil
 }
@@ -74,7 +88,15 @@ func (e *rpcError) Error() string { return fmt.Sprintf("%d %s", e.Code, e.Messag
 // request: запрос и ответ на него (stdio, JSON по строкам).
 func (c *mcpClient) request(method string, params any) (json.RawMessage, error) {
 	c.id++
-	if err := c.send(map[string]any{"jsonrpc": "2.0", "id": c.id, "method": method, "params": params}); err != nil {
+	p, _ := params.(map[string]any)
+	if p == nil {
+		p = map[string]any{}
+	}
+	p["_meta"] = map[string]any{
+		"io.modelcontextprotocol/protocolVersion": mcpVersion,
+		"io.modelcontextprotocol/clientInfo":      map[string]any{"name": "leash-e2e", "version": "0"},
+	}
+	if err := c.send(map[string]any{"jsonrpc": "2.0", "id": c.id, "method": method, "params": p}); err != nil {
 		return nil, err
 	}
 	for {
@@ -140,17 +162,35 @@ func (c *mcpClient) close() {
 
 // --- Задача ---
 
-// run — идущая задача: сценарий исполняется в своей горутине.
+// run — идущая задача: сценарий драйвера (mcp) или настоящий Claude Code
+// (claude) исполняется в своей горутине.
 type run struct {
-	done  chan struct{}
-	final string
-	err   error
-	mcp   *mcpClient
+	done   chan struct{}
+	final  string
+	err    error
+	mcp    *mcpClient
+	claude *exec.Cmd
 }
 
 // task: изоляция вкладок, Leash не на паузе, вкладка на url, затем сценарий
 // вызовов через мост. text — задача пользователя, только для журнала.
 func (e *env) task(url, text string, steps ...step) error {
+	if err := e.prepare(url); err != nil {
+		return err
+	}
+	mc, err := startMCP(e.host, e.home)
+	if err != nil {
+		return fmt.Errorf("мост: %w", err)
+	}
+	r := &run{done: make(chan struct{}), mcp: mc}
+	e.cur = r
+	go e.drive(r, steps)
+	return nil
+}
+
+// prepare: прошлая задача закрыта, одна вкладка, Leash не на паузе, журналы
+// пусты, вкладка на url.
+func (e *env) prepare(url string) error {
 	e.finish()
 	// Изоляция сценариев: одна вкладка, она же активная (прошлые сценарии
 	// могли открыть новые через window.open или target=_blank).
@@ -179,13 +219,6 @@ done("ok");`, e.extraTab); err != nil {
 			return fmt.Errorf("переход на %s: %w", url, err)
 		}
 	}
-	mc, err := startMCP(e.host, e.home)
-	if err != nil {
-		return fmt.Errorf("мост: %w", err)
-	}
-	r := &run{done: make(chan struct{}), mcp: mc}
-	e.cur = r
-	go e.drive(r, steps)
 	return nil
 }
 
@@ -219,12 +252,17 @@ func (e *env) drive(r *run, steps []step) {
 	}
 }
 
-// finish закрывает MCP-процесс прошлой задачи (сеанс в расширении кончается).
+// finish закрывает процесс прошлой задачи (сеанс в расширении кончается).
 func (e *env) finish() {
 	if e.cur == nil {
 		return
 	}
-	e.cur.mcp.close()
+	if e.cur.mcp != nil {
+		e.cur.mcp.close()
+	}
+	if e.cur.claude != nil {
+		e.cur.claude.Process.Kill()
+	}
 	<-e.cur.done
 	e.cur = nil
 }

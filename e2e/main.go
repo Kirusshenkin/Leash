@@ -45,8 +45,11 @@ func readExtID(extDir string) {
 type env struct {
 	m *Marionette
 	p *Proxy
-	// real: сценарии I* настоящей модели (флаг -real).
-	real bool
+	// real: сценарии I* настоящей модели (флаг -real); model — модель для claude -p.
+	real  bool
+	model string
+	// mcpConfig — конфигурация MCP для claude -p (только при -real).
+	mcpConfig string
 	// host — бинарник leash-host; home — домашний каталог стенда (сокет моста).
 	host, home string
 	// cur — идущая задача.
@@ -62,6 +65,7 @@ func main() {
 	only := flag.String("run", "", "запускать только сценарии, чьё имя содержит строку")
 	headed := flag.Bool("headed", false, "показывать окно Firefox")
 	real := flag.Bool("real", false, "настоящая модель через claude -p, сценарии из e2e/private")
+	model := flag.String("model", "", "модель для -real (по умолчанию — модель Claude Code)")
 	flag.Parse()
 
 	root, err := filepath.Abs("..")
@@ -73,7 +77,9 @@ func main() {
 	}
 
 	if *real {
-		fail("-real ещё не перенесён на мост (issue #7)")
+		if _, err := exec.LookPath("claude"); err != nil {
+			fail("для -real нужен Claude Code (claude) в PATH")
+		}
 	}
 	host := filepath.Join(root, "target", "release", "leash-host")
 	if _, err := os.Stat(host); err != nil {
@@ -130,7 +136,11 @@ user_pref("browser.startup.page", 0);
 		"alwaysMatch": map[string]any{"acceptInsecureCerts": true},
 	}})
 	must(err)
-	e := &env{m: m, p: p, real: *real, host: host, home: home}
+	e := &env{m: m, p: p, real: *real, model: *model, host: host, home: home}
+	if *real {
+		e.mcpConfig, err = writeMCPConfig(host, home)
+		must(err)
+	}
 	must(e.setup(extDir))
 	defer e.finish()
 

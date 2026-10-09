@@ -14,6 +14,8 @@ pub const MODERN: &str = "2026-07-28";
 pub const LEGACY: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 const META_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+/// Сколько клиент может не перезапрашивать tools/list (час).
+const TOOLS_TTL_MS: f64 = 3_600_000.0;
 const UNSUPPORTED_VERSION: f64 = -32022.0;
 const PARSE_ERROR: f64 = -32700.0;
 const INVALID_REQUEST: f64 = -32600.0;
@@ -74,10 +76,17 @@ pub fn handle(msg: &Value, call: &mut dyn FnMut(&str, &Value) -> (String, bool))
             ("instructions", Value::str(INSTRUCTIONS)),
         ]),
         "ping" => Value::Obj(Vec::new()),
-        "tools/list" => complete(vec![(
-            "tools",
-            Value::Arr(tools::definitions().into_iter().map(tool_value).collect()),
-        )]),
+        // Список инструментов зашит в бинарник и одинаков для всех: клиент
+        // может кэшировать его (ttlMs и cacheScope обязательны в 2026-07-28;
+        // без них Claude Code отбрасывает весь список).
+        "tools/list" => complete(vec![
+            (
+                "tools",
+                Value::Arr(tools::definitions().into_iter().map(tool_value).collect()),
+            ),
+            ("ttlMs", Value::Num(TOOLS_TTL_MS)),
+            ("cacheScope", Value::str("public")),
+        ]),
         "tools/call" => return Some(call_tool(id, params, call)),
         _ => return Some(error(id, METHOD_NOT_FOUND, "Неизвестный метод", None)),
     };
@@ -307,6 +316,9 @@ mod tests {
         let r = run(r#"{"jsonrpc":"2.0","id":4,"method":"tools/list"}"#);
         let list = result(&r).get("tools").and_then(Value::as_arr).unwrap();
         assert_eq!(list.len(), tools::definitions().len());
+        // Обязательны в 2026-07-28: без них Claude Code отвергает список.
+        assert!(result(&r).get("ttlMs").and_then(Value::as_f64).is_some());
+        assert_eq!(result(&r).get("cacheScope").and_then(Value::as_str), Some("public"));
         for t in list {
             assert!(t.get("inputSchema").is_some());
             assert!(
