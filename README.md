@@ -72,12 +72,17 @@ make zip     # архив для AMO в dist/
 
 Зависимости Rust берутся только из `vendor/` (`--offline --locked`).
 
+CI (`.github/workflows/check.yml`): на каждый push — `make check`, `make e2e`
+в headless Firefox и поиск ключей API во всей истории git. Без Homebrew
+`make` нужен с `RUSTUP_BIN=$HOME/.cargo/bin`.
+
 ### e2e
 
 `make e2e` (или `go -C e2e run .`) запускает Firefox без окна и прогоняет сценарии:
 S — политика и действия, X — утечки и побег с разрешённых сайтов, R — устойчивость
 (ошибки API, XSS в панели, подтверждения, маскировка опасных слов). Флаги:
-`-run <подстрока>` — выбрать сценарии, `-headed` — показать окно.
+`-run <подстрока>` — выбрать сценарии, `-headed` — показать окно. Firefox берётся из
+`$FIREFOX`, иначе `/Applications/Firefox.app`, иначе из `PATH`.
 
 Сценарии I проверяют настоящую модель на страницах с инъекциями: `-real` с
 `ANTHROPIC_API_KEY` в окружении. Страницы лежат в `e2e/private/` — каталог не

@@ -1,4 +1,5 @@
 # Сборка без npm и бандлеров. Тулчейн закреплён в rust-toolchain.toml.
+# Без Homebrew (CI на Linux) передайте RUSTUP_BIN=$HOME/.cargo/bin.
 RUSTUP_BIN ?= $(shell brew --prefix rustup 2>/dev/null)/bin
 export PATH := $(RUSTUP_BIN):$(HOME)/.cargo/bin:$(PATH)
 # make 3.81 на macOS ищет команды по старому PATH, поэтому пути явные.

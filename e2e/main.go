@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	firefoxBin = "/Applications/Firefox.app/Contents/MacOS/firefox"
+	macFirefox = "/Applications/Firefox.app/Contents/MacOS/firefox"
 	// Фальшивый ключ собран из частей, чтобы pre-commit не принял его за настоящий.
 	testKey = "sk-ant-" + "api03-" + "e2eTESTKEYe2eTESTKEYe2eTESTKEYe2eTESTKEY0000"
 )
@@ -101,7 +101,7 @@ user_pref("browser.startup.page", 0);
 	if !*headed {
 		args = append(args, "-headless")
 	}
-	ff := exec.Command(firefoxBin, args...)
+	ff := exec.Command(firefoxBin(), args...)
 	must(ff.Start())
 	defer func() {
 		ff.Process.Kill()
@@ -419,4 +419,18 @@ func fail(msg string) {
 func dump(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// firefoxBin: $FIREFOX, иначе Firefox.app на macOS, иначе firefox из PATH.
+func firefoxBin() string {
+	if p := os.Getenv("FIREFOX"); p != "" {
+		return p
+	}
+	if _, err := os.Stat(macFirefox); err == nil {
+		return macFirefox
+	}
+	if p, err := exec.LookPath("firefox"); err == nil {
+		return p
+	}
+	return macFirefox
 }
