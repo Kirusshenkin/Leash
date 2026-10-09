@@ -15,10 +15,12 @@ mod guard;
 mod options;
 mod page;
 mod policy;
+mod probe;
 mod protocol;
 mod settings;
 mod sidebar;
 mod stream;
+mod text;
 mod tools;
 mod value;
 

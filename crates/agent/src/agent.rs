@@ -19,6 +19,7 @@ use crate::ext;
 use crate::guard::{self, Verdict};
 use crate::page::{self, ActOutcome, Snapshot};
 use crate::policy::{self, Access, Origin, Policy};
+use crate::probe;
 use crate::protocol::Event;
 use crate::settings::{self, ApiKey};
 use crate::stream::Stream;
@@ -255,6 +256,8 @@ struct Task {
     read: Vec<Origin>,
     /// Вкладки из последнего list_tabs.
     tabs: Vec<f64>,
+    /// Сайты, где проба нашла признаки инъекции, с этими признаками.
+    suspect: Vec<String>,
     user_text: String,
     recent: Vec<ToolCall>,
     shared: Shared,
@@ -290,6 +293,20 @@ impl Task {
     fn note_read(&mut self, origin: &Origin) {
         if !self.read.contains(origin) {
             self.read.push(origin.clone());
+        }
+    }
+
+    /// Запоминает признаки инъекции на сайте и показывает их в панели.
+    fn note_suspect(&mut self, origin: &Origin, signs: &[&str]) {
+        if signs.is_empty() {
+            return;
+        }
+        let line = format!("{origin}: {}", signs.join(", "));
+        self.post(&Event::Step(format!(
+            "внимание, признаки инъекции — {line}"
+        )));
+        if !self.suspect.contains(&line) {
+            self.suspect.push(line);
         }
     }
 
@@ -376,6 +393,7 @@ impl Task {
                 user_text: &self.user_text,
             },
         );
+        let verdict = self.escalate(&call, verdict);
         match verdict {
             Verdict::Allow => {}
             Verdict::Block(why) => {
@@ -405,6 +423,30 @@ impl Task {
         self.perform(&call, &access).await
     }
 
+    /// После страницы с признаками инъекции всё, что меняет состояние
+    /// браузера, подтверждает пользователь.
+    fn escalate(&self, call: &ToolCall, verdict: Verdict) -> Verdict {
+        let reads = matches!(
+            call,
+            ToolCall::ReadPage | ToolCall::Scroll { .. } | ToolCall::ListTabs
+        );
+        if reads || self.suspect.is_empty() {
+            return verdict;
+        }
+        let reason = format!(
+            "в этой задаче прочитан сайт с признаками инъекции ({})",
+            self.suspect.join("; ")
+        );
+        match verdict {
+            Verdict::Allow => Verdict::Confirm(vec![reason]),
+            Verdict::Confirm(mut reasons) => {
+                reasons.push(reason);
+                Verdict::Confirm(reasons)
+            }
+            block => block,
+        }
+    }
+
     async fn perform(&mut self, call: &ToolCall, access: &Access) -> Done {
         let Some(tab) = self.tab else {
             return refused("Нет рабочей вкладки.");
@@ -430,6 +472,7 @@ impl Task {
                     return refused("Пока читали, вкладка ушла на другой сайт.");
                 }
                 self.note_read(&origin);
+                self.note_suspect(&origin, &probe::scan_snapshot(&snapshot));
                 let text = page::render(&snapshot);
                 self.snapshot = Some(snapshot);
                 Done {
@@ -471,6 +514,7 @@ impl Task {
                             ("name", Value::str(&el.name)),
                             ("type", Value::str(&el.kind)),
                             ("href", Value::str(&el.href)),
+                            ("download", Value::Bool(el.download)),
                             ("form", Value::Bool(el.form)),
                             ("formAction", Value::str(&el.form_action)),
                             ("submits", Value::Bool(el.submits)),
@@ -590,6 +634,8 @@ impl Task {
                         .and_then(|v| v.as_string())
                         .unwrap_or_default();
                     let title: String = title.chars().take(200).collect();
+                    let signs = probe::scan(&[&title, url.as_deref().unwrap_or_default()]);
+                    self.note_suspect(&origin, &signs);
                     lines.push(format!(
                         "[{n}] {origin} «{}»{mark}",
                         page::clean_line(&title)
@@ -721,6 +767,7 @@ async fn run_loop(
         snapshot: None,
         read: Vec::new(),
         tabs: Vec::new(),
+        suspect: Vec::new(),
         user_text: user_texts(history),
         recent: Vec::new(),
         shared: shared.clone(),

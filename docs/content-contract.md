@@ -62,6 +62,7 @@ Element:
   checked: <true/false для checkbox/radio, иначе false>,
   disabled: <bool>,
   href: <для a[href]/area[href]: абсолютный a.href, иначе "">,
+  download: <bool: у a/area есть атрибут download>,
   form: <bool: элемент принадлежит форме (el.form != null)>,
   formAction: <если form: абсолютный form.action, иначе "">,
   submits: <bool: клик отправит форму: button без type или type=submit в форме, input type=submit|image>,
@@ -103,7 +104,7 @@ script/style/noscript/template; родитель видим по тем же п�
 ### `{ op: "act", origin, version, id, action, text, submit, expect }`
 
 `expect` — факты элемента из снимка, на которых основано решение политики:
-`{ tag, role, name, type, href, form, formAction, submits, autocomplete, editable }`.
+`{ tag, role, name, type, href, download, form, formAction, submits, autocomplete, editable }`.
 
 `action`: `"click" | "type" | "select"`. Перед действием, по порядку:
 

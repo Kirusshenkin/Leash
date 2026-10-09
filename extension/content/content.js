@@ -71,6 +71,7 @@ if (!globalThis.leashRun) {
   const facts = (el) => ({
     tag: el.localName, role: roleOf(el), name: nameOf(el), type: typeOf(el),
     href: (el.localName === "a" || el.localName === "area") && el.hasAttribute("href") ? String(el.href) : "",
+    download: (el.localName === "a" || el.localName === "area") && el.hasAttribute("download"),
     form: !!el.form, formAction: formAction(el), submits: submits(el),
     autocomplete: (attr(el, "autocomplete") || "").toLowerCase(), editable: editable(el),
   });

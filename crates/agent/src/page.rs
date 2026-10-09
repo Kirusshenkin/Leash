@@ -5,6 +5,7 @@
 //! из данных страницы заменяются, поэтому подделать разделитель или
 //! «атрибуты» элемента нельзя даже без знания nonce.
 
+use crate::text::contains_any;
 use crate::value::Value;
 
 pub(crate) const MAX_ELEMENTS: usize = 400;
@@ -45,6 +46,8 @@ pub(crate) struct Element {
     pub checked: bool,
     pub disabled: bool,
     pub href: String,
+    /// Ссылка с атрибутом download: переход скачивает файл.
+    pub download: bool,
     pub form: bool,
     pub form_action: String,
     pub submits: bool,
@@ -114,6 +117,7 @@ const ELEMENT_KEYS: &[&str] = &[
     "checked",
     "disabled",
     "href",
+    "download",
     "form",
     "formAction",
     "submits",
@@ -122,6 +126,31 @@ const ELEMENT_KEYS: &[&str] = &[
     "options",
     "inView",
 ];
+
+/// Признаки поля пароля, платёжных данных или одноразового кода.
+const SECRET_AUTOCOMPLETE: &[&str] = &["password", "cc-", "one-time-code"];
+const SECRET_WORDS: &[&str] = &[
+    "password",
+    "пароль",
+    "cvv",
+    "cvc",
+    "card number",
+    "номер карты",
+    "iban",
+    "кодовое слово",
+    "секретн",
+    "one-time code",
+    "одноразов",
+    "код из sms",
+    "код из смс",
+];
+
+/// Поле для пароля, данных карты или одноразового кода.
+pub(crate) fn is_secret(el: &Element) -> bool {
+    el.kind == "password"
+        || contains_any(&el.autocomplete, SECRET_AUTOCOMPLETE)
+        || contains_any(&el.name, SECRET_WORDS)
+}
 
 fn parse_element(v: &Value, truncated: &mut bool) -> Result<Element, PageError> {
     if !v.has_exact_keys(ELEMENT_KEYS) {
@@ -164,7 +193,7 @@ fn parse_element(v: &Value, truncated: &mut bool) -> Result<Element, PageError> 
         *truncated |= cut_off;
         options.push(s);
     }
-    Ok(Element {
+    let mut el = Element {
         // Номер в пределах MAX_ELEMENTS проверен вызывающим.
         id: uint(v, "id", u64::from(u32::MAX))? as u32,
         tag,
@@ -175,6 +204,7 @@ fn parse_element(v: &Value, truncated: &mut bool) -> Result<Element, PageError> 
         checked: boolean(v, "checked")?,
         disabled: boolean(v, "disabled")?,
         href,
+        download: boolean(v, "download")?,
         form: boolean(v, "form")?,
         form_action,
         submits: boolean(v, "submits")?,
@@ -182,7 +212,13 @@ fn parse_element(v: &Value, truncated: &mut bool) -> Result<Element, PageError> 
         editable: boolean(v, "editable")?,
         options,
         in_view: boolean(v, "inView")?,
-    })
+    };
+    // Значения паролей, данных карт и кодов не уходят модели (пароль
+    // content-скрипт и так не отдаёт).
+    if is_secret(&el) {
+        el.value.clear();
+    }
+    Ok(el)
 }
 
 const SNAPSHOT_KEYS: &[&str] = &[
@@ -377,6 +413,7 @@ pub(crate) mod tests {
             checked: false,
             disabled: false,
             href: String::new(),
+            download: false,
             form: false,
             form_action: String::new(),
             submits: false,
@@ -398,6 +435,7 @@ pub(crate) mod tests {
             ("checked", Value::Bool(e.checked)),
             ("disabled", Value::Bool(e.disabled)),
             ("href", Value::str(&e.href)),
+            ("download", Value::Bool(e.download)),
             ("form", Value::Bool(e.form)),
             ("formAction", Value::str(&e.form_action)),
             ("submits", Value::Bool(e.submits)),
@@ -646,6 +684,7 @@ pub(crate) mod tests {
                 ("checked", Value::Bool(false)),
                 ("disabled", Value::Bool(false)),
                 ("href", Value::str("")),
+                ("download", Value::Bool(false)),
                 ("form", Value::Bool(false)),
                 ("formAction", Value::str("")),
                 ("submits", Value::Bool(false)),
@@ -789,7 +828,7 @@ pub(crate) mod tests {
         let mut v = element_value(&e);
         // Set one option to number instead of string
         if let Value::Obj(f) = &mut v
-            && let Value::Arr(opts) = &mut f[14].1
+            && let Value::Arr(opts) = &mut f[15].1
         {
             opts[1] = Value::Num(42.0);
         }
@@ -1015,6 +1054,7 @@ pub(crate) mod tests {
                 ("checked", Value::Bool(false)),
                 ("disabled", Value::Bool(false)),
                 ("href", Value::str("")),
+                ("download", Value::Bool(false)),
                 ("form", Value::Bool(false)),
                 ("formAction", Value::str("")),
                 ("submits", Value::Bool(false)),
@@ -1025,5 +1065,25 @@ pub(crate) mod tests {
             ])]);
         }
         assert_eq!(parse_snapshot(&s), Err(PageError::BadShape("id")));
+    }
+
+    #[test]
+    fn secret_values_never_reach_the_model() {
+        let mut card = element(1, "textbox", "Номер карты");
+        card.value = "4111 1111 1111 1111".into();
+        let mut otp = element(2, "textbox", "Code");
+        otp.autocomplete = "one-time-code".into();
+        otp.value = "123456".into();
+        let mut plain = element(3, "textbox", "Город");
+        plain.value = "Белград".into();
+        let s = parse_snapshot(&snapshot_value(vec![
+            element_value(&card),
+            element_value(&otp),
+            element_value(&plain),
+        ]))
+        .unwrap();
+        let out = render(&s);
+        assert!(!out.contains("4111") && !out.contains("123456"), "{out}");
+        assert!(out.contains("Белград"), "{out}");
     }
 }

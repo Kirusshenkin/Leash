@@ -10,6 +10,7 @@
 
 use crate::page::{Element, Snapshot};
 use crate::policy::{Access, Origin};
+use crate::text::contains_any;
 use crate::tools::ToolCall;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +67,7 @@ const DANGER_WORDS: &[&str] = &[
     "subscribe",
     "sign",
     "apply",
+    "sell",
     "купить",
     "куплю",
     "оплат",
@@ -93,20 +95,45 @@ const DANGER_WORDS: &[&str] = &[
     "оформ",
     "пожертв",
     "подать",
+    "продат",
+    "продаж",
 ];
 
-/// Признаки поля пароля или платёжных данных.
-const SECRET_AUTOCOMPLETE: &[&str] = &["password", "cc-", "one-time-code"];
-const SECRET_WORDS: &[&str] = &[
-    "password",
-    "пароль",
-    "cvv",
-    "cvc",
-    "card number",
-    "номер карты",
-    "iban",
-    "кодовое слово",
-    "секретн",
+/// CAPTCHA проходит только человек: агент её не трогает.
+const CAPTCHA_WORDS: &[&str] = &[
+    "captcha",
+    "капча",
+    "капчу",
+    "not a robot",
+    "не робот",
+    "verify you are human",
+    "подтвердите, что вы человек",
+];
+
+/// Расширения файлов, переход на которые скачивает программу или архив.
+const DOWNLOAD_EXTENSIONS: &[&str] = &[
+    ".exe",
+    ".msi",
+    ".dmg",
+    ".pkg",
+    ".app",
+    ".apk",
+    ".deb",
+    ".rpm",
+    ".appimage",
+    ".sh",
+    ".bat",
+    ".cmd",
+    ".ps1",
+    ".jar",
+    ".zip",
+    ".rar",
+    ".7z",
+    ".tar",
+    ".gz",
+    ".xpi",
+    ".crx",
+    ".iso",
 ];
 
 /// Самый короткий фрагмент текста пользователя, который можно вводить на
@@ -120,77 +147,14 @@ fn typed_by_user(user_text: &str, text: &str) -> bool {
     text.chars().count() >= MIN_USER_FRAGMENT && user_text.contains(text)
 }
 
-/// Слово целиком в имени элемента ищется по «скелету»: страница не должна
-/// прятать «удалить» от проверки невидимым символом, диакритикой, буквой
-/// другого алфавита того же вида или полноширинной формой.
-fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    let h = skeleton(haystack);
-    needles.iter().any(|n| h.contains(&skeleton(n)))
-}
-
-/// Нижний регистр без невидимых символов и комбинирующих знаков; похожие
-/// буквы кириллицы и греческого сведены к латинским, пробелы — к одному.
-fn skeleton(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut space = false;
-    for c in s.chars().flat_map(char::to_lowercase) {
-        let c = match c {
-            '\u{00AD}'
-            | '\u{034F}'
-            | '\u{061C}'
-            | '\u{115F}'
-            | '\u{1160}'
-            | '\u{17B4}'
-            | '\u{17B5}'
-            | '\u{180B}'..='\u{180F}'
-            | '\u{200B}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{206F}'
-            | '\u{3164}'
-            | '\u{FE00}'..='\u{FE0F}'
-            | '\u{FEFF}'
-            | '\u{FFA0}'
-            | '\u{E0000}'..='\u{E0FFF}'
-            | '\u{0300}'..='\u{036F}'
-            | '\u{0483}'..='\u{0489}'
-            | '\u{1AB0}'..='\u{1AFF}'
-            | '\u{1DC0}'..='\u{1DFF}'
-            | '\u{20D0}'..='\u{20FF}'
-            | '\u{FE20}'..='\u{FE2F}' => continue,
-            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
-            'а' | 'α' => 'a',
-            'в' | 'β' => 'b',
-            'с' | 'ς' => 'c',
-            'е' | 'ё' | 'є' | 'ε' => 'e',
-            'һ' => 'h',
-            'і' | 'ї' | 'ı' | 'ι' | 'ӏ' => 'i',
-            'ј' => 'j',
-            'к' | 'κ' => 'k',
-            'м' => 'm',
-            'н' | 'η' => 'n',
-            'о' | 'ο' | '0' => 'o',
-            'р' | 'ρ' => 'p',
-            'ԛ' => 'q',
-            'ѕ' => 's',
-            'т' | 'τ' => 't',
-            'у' | 'υ' | 'γ' => 'y',
-            'х' | 'χ' => 'x',
-            'ԝ' | 'ѡ' => 'w',
-            'ь' => 'b',
-            c if c.is_whitespace() => ' ',
-            c => c,
-        };
-        if c == ' ' {
-            if !space {
-                out.push(' ');
-            }
-            space = true;
-        } else {
-            out.push(c);
-            space = false;
-        }
+/// Нажатие скачает файл: атрибут download или адрес программы/архива.
+fn downloads(el: &Element) -> bool {
+    if el.download {
+        return true;
     }
-    out
+    let path = el.href.split(['?', '#']).next().unwrap_or_default();
+    let path = path.to_ascii_lowercase();
+    DOWNLOAD_EXTENSIONS.iter().any(|ext| path.ends_with(ext))
 }
 
 fn is_root(url: &str, origin: &Origin) -> bool {
@@ -237,6 +201,9 @@ fn element<'a>(ctx: &'a Ctx<'_>, id: u32) -> Result<(&'a Element, &'a Origin), V
         .ok_or_else(|| Verdict::Block(format!("элемента [{id}] нет в последнем снимке")))?;
     if el.disabled {
         return Err(Verdict::Block(format!("элемент [{id}] недоступен")));
+    }
+    if contains_any(&el.name, CAPTCHA_WORDS) {
+        return Err(Verdict::Block("CAPTCHA проходит пользователь сам".into()));
     }
     Ok((el, current))
 }
@@ -291,6 +258,12 @@ pub(crate) fn decide(call: &ToolCall, ctx: &Ctx<'_>) -> Verdict {
             {
                 return block;
             }
+            if downloads(el) {
+                reasons.push(format!(
+                    "скачивание файла: {}",
+                    crate::page::clean_line(&el.href)
+                ));
+            }
             if contains_any(&el.name, DANGER_WORDS) {
                 reasons.push(format!(
                     "кнопка «{}» похожа на необратимое действие",
@@ -314,13 +287,14 @@ pub(crate) fn decide(call: &ToolCall, ctx: &Ctx<'_>) -> Verdict {
             if el.kind == "file" {
                 return Verdict::Block("работа с файлами запрещена".into());
             }
-            let mut reasons = Vec::new();
-            if el.kind == "password"
-                || contains_any(&el.autocomplete, SECRET_AUTOCOMPLETE)
-                || contains_any(&el.name, SECRET_WORDS)
-            {
-                reasons.push("ввод в поле пароля или платёжных данных".into());
+            // Пароли, данные карт и коды вводит только пользователь: они не
+            // должны проходить через модель.
+            if crate::page::is_secret(el) {
+                return Verdict::Block(
+                    "пароли, данные карт и одноразовые коды пользователь вводит сам".into(),
+                );
             }
+            let mut reasons = Vec::new();
             let others = foreign(ctx, current);
             if !others.is_empty() && !text.trim().is_empty() && !typed_by_user(ctx.user_text, text)
             {
@@ -571,7 +545,7 @@ mod tests {
         ]);
         for id in [1, 2, 3, 6, 7] {
             assert!(
-                is_confirm(&w.decide(ToolCall::TypeText {
+                is_block(&w.decide(ToolCall::TypeText {
                     element: id,
                     text: "x".into(),
                     submit: false
@@ -749,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn password_fields_require_confirmation() {
+    fn password_fields_are_blocked() {
         let mut pass = textbox(1, "");
         pass.kind = "password".into();
         let w = World::new(vec![pass]);
@@ -758,7 +732,7 @@ mod tests {
             text: "x".into(),
             submit: false,
         });
-        assert!(is_confirm(&v));
+        assert!(is_block(&v));
     }
 
     #[test]
@@ -769,5 +743,57 @@ mod tests {
         ]);
         assert!(is_block(&w.decide(ToolCall::Click { element: 1 })));
         assert!(is_block(&w.decide(ToolCall::Click { element: 2 })));
+    }
+
+    #[test]
+    fn captcha_is_never_touched() {
+        let w = World::new(vec![
+            el(1, "checkbox", "I'm not a robot"),
+            textbox(2, "Введите к\u{200B}апчу"),
+            el(3, "button", "Verify you are human"),
+        ]);
+        assert!(is_block(&w.decide(ToolCall::Click { element: 1 })));
+        assert!(is_block(&w.decide(ToolCall::TypeText {
+            element: 2,
+            text: "abc".into(),
+            submit: false
+        })));
+        assert!(is_block(&w.decide(ToolCall::Click { element: 3 })));
+    }
+
+    #[test]
+    fn downloads_need_confirmation() {
+        let mut attr = link(1, "https://shop.example/report");
+        attr.download = true;
+        let w = World::new(vec![
+            attr,
+            link(2, "https://shop.example/setup.EXE?v=2"),
+            link(3, "https://shop.example/files/a.zip#top"),
+            link(4, "https://shop.example/catalog.html"),
+            link(5, "https://shop.example/zip"),
+        ]);
+        for id in [1, 2, 3] {
+            assert!(
+                is_confirm(&w.decide(ToolCall::Click { element: id })),
+                "{id}"
+            );
+        }
+        for id in [4, 5] {
+            assert_eq!(
+                w.decide(ToolCall::Click { element: id }),
+                Verdict::Allow,
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn selling_needs_confirmation() {
+        let w = World::new(vec![
+            el(1, "button", "Sell 10 shares"),
+            el(2, "button", "Продать"),
+        ]);
+        assert!(is_confirm(&w.decide(ToolCall::Click { element: 1 })));
+        assert!(is_confirm(&w.decide(ToolCall::Click { element: 2 })));
     }
 }
