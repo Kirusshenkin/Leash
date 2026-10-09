@@ -12,8 +12,11 @@
 
   <section>
     <h2>Ключ API Anthropic</h2>
-    <p class="hint">Используйте отдельный ключ с лимитом расходов в консоли Anthropic.
-      Ключ хранится в storage.session: он недоступен скриптам на страницах, не показывается после
+    <p class="hint">Ключ создаётся в консоли Anthropic: platform.claude.com → Settings → API keys.
+      Вход через аккаунт claude.ai невозможен: Anthropic не разрешает сторонним расширениям
+      работать по подписке. Заведите для Leash отдельный ключ, задайте ему короткий срок
+      действия (консоль предлагает от 1 до 30 дней) и лимит расходов.</p>
+    <p class="hint">Ключ хранится в storage.session: он недоступен скриптам на страницах, не показывается после
       сохранения и стирается при закрытии Firefox — после перезапуска его нужно ввести снова.</p>
     <p id="key-status"></p>
     <input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…">

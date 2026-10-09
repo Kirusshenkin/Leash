@@ -10,6 +10,11 @@
    Anthropic API по задаче пользователя (обязательна на AMO с 03.11.2025).
 2. Поднять `version`.
 3. `make check && make e2e && make zip` — архив в `dist/leash-<версия>.zip`.
+4. `npx -y addons-linter@10.13.0 dist/leash-<версия>.zip`. Ожидается 0 ошибок
+   и одно предупреждение `KEY_FIREFOX_ANDROID_UNSUPPORTED_BY_MIN_VERSION`:
+   `data_collection_permissions` есть на Android только с версии 142. Leash
+   работает только на десктопе (`sidebar_action` на Android нет), поэтому при
+   загрузке платформу «Firefox for Android» не отмечать.
 
 ## Исходный код для ревьюеров
 
