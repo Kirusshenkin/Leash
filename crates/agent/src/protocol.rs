@@ -69,6 +69,9 @@ pub(crate) enum Event {
     Ready,
     Busy(bool),
     Reply(String),
+    /// Черновик ответа по ходу потока: весь текст к этому моменту.
+    /// Следующий `Reply` (или конец задачи) его заменяет.
+    Partial(String),
     Error(String),
     Notice(String),
     /// Шаг агента: что он делает.
@@ -137,6 +140,7 @@ pub(crate) fn parse_event(raw: &RawMessage) -> Result<Event, Rejected> {
             raw.busy.map(Event::Busy).ok_or(Rejected::BadShape)
         }
         Some("reply") => text().map(Event::Reply),
+        Some("partial") => text().map(Event::Partial),
         Some("error") => text().map(Event::Error),
         Some("notice") => text().map(Event::Notice),
         Some("step") => text().map(Event::Step),
@@ -257,6 +261,7 @@ pub(crate) fn event_to_js(event: &Event) -> JsValue {
             obj.into()
         }
         Event::Reply(text) => with_text("reply", text).into(),
+        Event::Partial(text) => with_text("partial", text).into(),
         Event::Error(text) => with_text("error", text).into(),
         Event::Notice(text) => with_text("notice", text).into(),
         Event::Step(text) => with_text("step", text).into(),

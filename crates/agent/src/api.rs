@@ -1,17 +1,19 @@
-//! Запрос к Messages API Anthropic через браузерный `fetch`.
+//! Запрос к Messages API Anthropic через браузерный `fetch` с потоковым ответом.
 //!
 //! Тело ответа об ошибке в интерфейс не попадает: только HTTP-статус и тип
 //! ошибки из закрытого списка. Тело запроса и разбор ответа — чистые функции
 //! над `Value`, они тестируются без браузера.
 
+use js_sys::Uint8Array;
 use js_sys::futures::JsFuture;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{
-    AbortSignal, Headers, ReferrerPolicy, RequestCache, RequestCredentials, RequestInit,
-    RequestMode, RequestRedirect, Response,
+    AbortSignal, Headers, ReadableStreamDefaultReader, ReadableStreamReadResult, ReferrerPolicy,
+    RequestCache, RequestCredentials, RequestInit, RequestMode, RequestRedirect, Response,
 };
 
 use crate::settings::ApiKey;
+use crate::stream::Stream;
 use crate::tools;
 use crate::value::{self, Value};
 
@@ -193,6 +195,8 @@ pub(crate) enum ApiError {
     BadResponse,
     Refusal,
     EmptyReply,
+    /// Событие `error` посреди потока (HTTP-статус уже был 200).
+    Stream(Option<ErrorKind>),
 }
 
 impl ApiError {
@@ -204,23 +208,25 @@ impl ApiError {
             Self::BadResponse => "Неожиданный формат ответа API.".into(),
             Self::Refusal => "Модель отказалась отвечать на этот запрос.".into(),
             Self::EmptyReply => "Модель не вернула текст. Возможно, мал лимит max_tokens.".into(),
-            Self::Http { status, kind } => {
-                let what = match kind {
-                    Some(ErrorKind::Authentication) => "ключ API не принят",
-                    Some(ErrorKind::Billing) => "проблема с оплатой или лимитом расходов",
-                    Some(ErrorKind::Permission) => "у ключа нет доступа",
-                    Some(ErrorKind::NotFound) => "модель или адрес не найдены",
-                    Some(ErrorKind::RequestTooLarge) => "запрос слишком большой",
-                    Some(ErrorKind::RateLimit) => "превышен лимит запросов",
-                    Some(ErrorKind::Overloaded) => "API перегружен, повторите позже",
-                    Some(ErrorKind::Timeout) => "таймаут на стороне API",
-                    Some(ErrorKind::InvalidRequest) => "некорректный запрос",
-                    Some(ErrorKind::Api) => "внутренняя ошибка API",
-                    None => "неизвестная ошибка",
-                };
-                format!("Ошибка API {status}: {what}.")
-            }
+            Self::Stream(kind) => format!("Ошибка API во время ответа: {}.", kind_text(kind)),
+            Self::Http { status, kind } => format!("Ошибка API {status}: {}.", kind_text(kind)),
         }
+    }
+}
+
+fn kind_text(kind: Option<ErrorKind>) -> &'static str {
+    match kind {
+        Some(ErrorKind::Authentication) => "ключ API не принят",
+        Some(ErrorKind::Billing) => "проблема с оплатой или лимитом расходов",
+        Some(ErrorKind::Permission) => "у ключа нет доступа",
+        Some(ErrorKind::NotFound) => "модель или адрес не найдены",
+        Some(ErrorKind::RequestTooLarge) => "запрос слишком большой",
+        Some(ErrorKind::RateLimit) => "превышен лимит запросов",
+        Some(ErrorKind::Overloaded) => "API перегружен, повторите позже",
+        Some(ErrorKind::Timeout) => "таймаут на стороне API",
+        Some(ErrorKind::InvalidRequest) => "некорректный запрос",
+        Some(ErrorKind::Api) => "внутренняя ошибка API",
+        None => "неизвестная ошибка",
     }
 }
 
@@ -449,6 +455,7 @@ pub(crate) fn request_body(req: &Request<'_>) -> String {
     Value::obj(vec![
         ("model", Value::str(req.model)),
         ("max_tokens", Value::Num(f64::from(req.max_tokens))),
+        ("stream", Value::Bool(true)),
         ("system", Value::str(system_prompt(req.nonce))),
         ("tools", tools::definitions()),
         ("messages", Value::Arr(messages)),
@@ -456,7 +463,13 @@ pub(crate) fn request_body(req: &Request<'_>) -> String {
     .to_json()
 }
 
-pub(crate) async fn complete(req: &Request<'_>, signal: &AbortSignal) -> Result<Reply, ApiError> {
+/// Запрос с потоковым ответом. `on_progress` вызывается после каждой порции
+/// байтов: по нему сбрасывается таймер простоя и обновляется черновик в панели.
+pub(crate) async fn complete(
+    req: &Request<'_>,
+    signal: &AbortSignal,
+    on_progress: &mut dyn FnMut(&Stream),
+) -> Result<Reply, ApiError> {
     let body = request_body(req);
     let headers = Headers::new().map_err(|_| ApiError::Internal)?;
     for (name, value) in [
@@ -488,24 +501,66 @@ pub(crate) async fn complete(req: &Request<'_>, signal: &AbortSignal) -> Result<
         .dyn_into()
         .map_err(|_| ApiError::Internal)?;
 
-    let status = response.status();
-    let json = match response.json() {
-        Ok(promise) => JsFuture::from(promise)
-            .await
-            .ok()
-            .and_then(|j| value::from_js(&j)),
-        Err(_) => None,
-    };
     if !response.ok() {
+        // Ошибка приходит обычным JSON, не потоком.
+        let json = match response.json() {
+            Ok(promise) => JsFuture::from(promise)
+                .await
+                .ok()
+                .and_then(|j| value::from_js(&j)),
+            Err(_) => None,
+        };
         let kind = json
             .as_ref()
             .and_then(|j| j.get("error"))
             .and_then(|e| e.get("type"))
             .and_then(Value::as_str)
             .and_then(parse_error_kind);
-        return Err(ApiError::Http { status, kind });
+        return Err(ApiError::Http {
+            status: response.status(),
+            kind,
+        });
     }
-    parse_response(&json.ok_or(ApiError::BadResponse)?)
+    let is_sse = response
+        .headers()
+        .get("content-type")
+        .ok()
+        .flatten()
+        .is_some_and(|t| t.trim_start().starts_with("text/event-stream"));
+    let body = response
+        .body()
+        .filter(|_| is_sse)
+        .ok_or(ApiError::BadResponse)?;
+    let reader: ReadableStreamDefaultReader = body.get_reader().unchecked_into();
+    let result = read_stream(&reader, on_progress).await;
+    if result.is_err() {
+        // Остаток ответа не нужен: не держать соединение открытым.
+        let _ = reader.cancel();
+    }
+    result
+}
+
+async fn read_stream(
+    reader: &ReadableStreamDefaultReader,
+    on_progress: &mut dyn FnMut(&Stream),
+) -> Result<Reply, ApiError> {
+    let mut stream = Stream::default();
+    loop {
+        let chunk: ReadableStreamReadResult = JsFuture::from(reader.read())
+            .await
+            .map_err(|_| ApiError::Network)?
+            .unchecked_into();
+        if chunk.get_done().unwrap_or(false) {
+            break;
+        }
+        let bytes = chunk
+            .get_value()
+            .dyn_into::<Uint8Array>()
+            .map_err(|_| ApiError::BadResponse)?;
+        stream.feed(&bytes.to_vec())?;
+        on_progress(&stream);
+    }
+    stream.finish()
 }
 
 #[cfg(test)]

@@ -201,6 +201,228 @@ fn convert(value: &JsValue, depth: usize, budget: &mut Budget) -> Option<Value> 
     None
 }
 
+/// Разбор JSON-текста (строгий RFC 8259) с тем же бюджетом, что у `from_js`.
+/// Повторяющиеся ключи отклоняются: JS взял бы последний, `get` — первый,
+/// и два разборщика увидели бы разные данные.
+pub(crate) fn parse_json(text: &str) -> Option<Value> {
+    let mut p = Parser {
+        s: text.as_bytes(),
+        i: 0,
+        budget: Budget {
+            nodes: 0,
+            string_bytes: 0,
+        },
+    };
+    let v = p.value(0)?;
+    p.ws();
+    (p.i == p.s.len()).then_some(v)
+}
+
+struct Parser<'a> {
+    s: &'a [u8],
+    i: usize,
+    budget: Budget,
+}
+
+impl Parser<'_> {
+    fn peek(&self) -> Option<u8> {
+        self.s.get(self.i).copied()
+    }
+
+    fn ws(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+            self.i += 1;
+        }
+    }
+
+    fn eat(&mut self, lit: &[u8]) -> Option<()> {
+        self.s
+            .get(self.i..)?
+            .starts_with(lit)
+            .then(|| self.i += lit.len())
+    }
+
+    fn value(&mut self, depth: usize) -> Option<Value> {
+        self.budget.nodes += 1;
+        if depth > MAX_DEPTH || self.budget.nodes > MAX_NODES {
+            return None;
+        }
+        self.ws();
+        match self.peek()? {
+            b'n' => self.eat(b"null").map(|()| Value::Null),
+            b't' => self.eat(b"true").map(|()| Value::Bool(true)),
+            b'f' => self.eat(b"false").map(|()| Value::Bool(false)),
+            b'"' => self.string().map(Value::Str),
+            b'[' => {
+                self.i += 1;
+                let mut items = Vec::new();
+                self.ws();
+                if self.peek() == Some(b']') {
+                    self.i += 1;
+                    return Some(Value::Arr(items));
+                }
+                loop {
+                    items.push(self.value(depth + 1)?);
+                    self.ws();
+                    match self.peek()? {
+                        b',' => self.i += 1,
+                        b']' => {
+                            self.i += 1;
+                            return Some(Value::Arr(items));
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            b'{' => {
+                self.i += 1;
+                let mut fields: Vec<(String, Value)> = Vec::new();
+                self.ws();
+                if self.peek() == Some(b'}') {
+                    self.i += 1;
+                    return Some(Value::Obj(fields));
+                }
+                loop {
+                    self.ws();
+                    if self.peek()? != b'"' {
+                        return None;
+                    }
+                    let key = self.string()?;
+                    if fields.iter().any(|(k, _)| *k == key) {
+                        return None;
+                    }
+                    self.ws();
+                    self.eat(b":")?;
+                    let v = self.value(depth + 1)?;
+                    fields.push((key, v));
+                    self.ws();
+                    match self.peek()? {
+                        b',' => self.i += 1,
+                        b'}' => {
+                            self.i += 1;
+                            return Some(Value::Obj(fields));
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            b'-' | b'0'..=b'9' => self.number(),
+            _ => None,
+        }
+    }
+
+    fn digits(&mut self) -> usize {
+        let start = self.i;
+        while matches!(self.peek(), Some(b'0'..=b'9')) {
+            self.i += 1;
+        }
+        self.i - start
+    }
+
+    fn number(&mut self) -> Option<Value> {
+        let start = self.i;
+        if self.peek() == Some(b'-') {
+            self.i += 1;
+        }
+        match self.peek()? {
+            b'0' => self.i += 1,
+            b'1'..=b'9' => {
+                self.digits();
+            }
+            _ => return None,
+        }
+        if self.peek() == Some(b'.') {
+            self.i += 1;
+            if self.digits() == 0 {
+                return None;
+            }
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.i += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.i += 1;
+            }
+            if self.digits() == 0 {
+                return None;
+            }
+        }
+        // Срез — только ASCII по грамматике выше.
+        let text = std::str::from_utf8(&self.s[start..self.i]).ok()?;
+        text.parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite())
+            .map(Value::Num)
+    }
+
+    fn hex4(&mut self) -> Option<u32> {
+        let h = self.s.get(self.i..self.i + 4)?;
+        let h = std::str::from_utf8(h).ok()?;
+        if !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        self.i += 4;
+        u32::from_str_radix(h, 16).ok()
+    }
+
+    fn string(&mut self) -> Option<String> {
+        self.i += 1; // открывающая кавычка
+        let mut out = String::new();
+        loop {
+            let start = self.i;
+            while let Some(b) = self.peek() {
+                if b == b'"' || b == b'\\' || b < 0x20 {
+                    break;
+                }
+                self.i += 1;
+            }
+            // Вход — &str, а границы среза стоят на ASCII-байтах.
+            out.push_str(std::str::from_utf8(&self.s[start..self.i]).ok()?);
+            match self.peek()? {
+                b'"' => {
+                    self.i += 1;
+                    break;
+                }
+                b'\\' => {
+                    self.i += 1;
+                    let c = match self.peek()? {
+                        b'"' => '"',
+                        b'\\' => '\\',
+                        b'/' => '/',
+                        b'b' => '\u{8}',
+                        b'f' => '\u{c}',
+                        b'n' => '\n',
+                        b'r' => '\r',
+                        b't' => '\t',
+                        b'u' => {
+                            self.i += 1;
+                            let hi = self.hex4()?;
+                            let code = if (0xD800..0xDC00).contains(&hi) {
+                                self.eat(b"\\u")?;
+                                let lo = self.hex4()?;
+                                if !(0xDC00..0xE000).contains(&lo) {
+                                    return None;
+                                }
+                                0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)
+                            } else {
+                                hi
+                            };
+                            // Одиночная суррогатная половина — не символ.
+                            out.push(char::from_u32(code)?);
+                            continue;
+                        }
+                        _ => return None,
+                    };
+                    self.i += 1;
+                    out.push(c);
+                }
+                _ => return None, // управляющий символ без escape
+            }
+        }
+        self.budget.string_bytes += out.len();
+        (self.budget.string_bytes <= MAX_STRING_BYTES).then_some(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,5 +727,92 @@ mod tests {
         assert!(json.contains("42.5"));
         assert!(json.contains("test"));
         assert!(json.contains(r#"\n"#));
+    }
+
+    #[test]
+    fn parse_json_accepts_valid() {
+        let v = parse_json(r#" {"a":[1,-2.5e2,0,true,false,null],"b":"q\"\\\/\b\f\n\r\t\u0041\u044f\ud83d\ude00","c":{}} "#)
+            .unwrap();
+        assert_eq!(
+            v,
+            Value::obj(vec![
+                (
+                    "a",
+                    Value::Arr(vec![
+                        Value::Num(1.0),
+                        Value::Num(-250.0),
+                        Value::Num(0.0),
+                        Value::Bool(true),
+                        Value::Bool(false),
+                        Value::Null,
+                    ])
+                ),
+                ("b", Value::str("q\"\\/\u{8}\u{c}\n\r\tAя😀")),
+                ("c", Value::Obj(vec![])),
+            ])
+        );
+        assert_eq!(parse_json("[]"), Some(Value::Arr(vec![])));
+        assert_eq!(parse_json("\"я\""), Some(Value::str("я")));
+    }
+
+    #[test]
+    fn parse_json_roundtrip() {
+        let v = Value::obj(vec![
+            ("s", Value::str("\u{1}\u{2028}<>\"")),
+            ("n", Value::Num(1.5)),
+            ("a", Value::Arr(vec![Value::Null, Value::Obj(vec![])])),
+        ]);
+        assert_eq!(parse_json(&v.to_json()), Some(v));
+    }
+
+    #[test]
+    fn parse_json_rejects_invalid() {
+        for bad in [
+            "",
+            " ",
+            "{",
+            "[1,]",
+            "{\"a\":1,}",
+            "{a:1}",
+            "{'a':1}",
+            "01",
+            "1.",
+            ".5",
+            "+1",
+            "1e",
+            "-",
+            "NaN",
+            "Infinity",
+            "1e999",
+            "tru",
+            "nul",
+            "\"a",
+            "\"\\x\"",
+            "\"\\u12\"",
+            "\"\\ud800\"",
+            "\"\\udc00\"",
+            "\"\\ud800\\u0041\"",
+            "\"a\nb\"",
+            "\"\t\"",
+            "1 2",
+            "{} x",
+            "{\"a\":1,\"a\":2}",
+            "[1 2]",
+            "{\"a\" 1}",
+        ] {
+            assert_eq!(parse_json(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn parse_json_budget() {
+        let deep = "[".repeat(MAX_DEPTH + 2) + &"]".repeat(MAX_DEPTH + 2);
+        assert_eq!(parse_json(&deep), None);
+        let ok = "[".repeat(MAX_DEPTH) + &"]".repeat(MAX_DEPTH);
+        assert!(parse_json(&ok).is_some());
+        let many = format!("[{}0]", "0,".repeat(MAX_NODES));
+        assert_eq!(parse_json(&many), None);
+        let big = format!("[\"{0}\",\"{0}\"]", "x".repeat(MAX_STRING_BYTES / 2 + 1));
+        assert_eq!(parse_json(&big), None);
     }
 }

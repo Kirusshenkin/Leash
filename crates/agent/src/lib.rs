@@ -18,6 +18,7 @@ mod policy;
 mod protocol;
 mod settings;
 mod sidebar;
+mod stream;
 mod tools;
 mod value;
 

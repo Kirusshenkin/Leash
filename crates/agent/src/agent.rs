@@ -21,11 +21,16 @@ use crate::page::{self, ActOutcome, Snapshot};
 use crate::policy::{self, Access, Origin, Policy};
 use crate::protocol::Event;
 use crate::settings::{self, ApiKey};
+use crate::stream::Stream;
 use crate::tools::{self, Direction, ToolCall};
 use crate::value::{self, Value};
 
-/// Предельное время одного запроса к API.
-const REQUEST_TIMEOUT_MS: i32 = 180_000;
+/// Предельное время одного запроса к API, даже если поток идёт.
+const REQUEST_TIMEOUT_MS: i32 = 600_000;
+/// Сколько поток ответа может молчать (между порциями байтов).
+const IDLE_TIMEOUT_MS: i32 = 60_000;
+/// Как часто панель получает черновик ответа.
+const PARTIAL_INTERVAL_MS: f64 = 250.0;
 /// Сколько запросов к модели допускает одна задача.
 const MAX_STEPS: usize = 30;
 /// Сколько раз подряд модель может повторить один и тот же вызов.
@@ -729,7 +734,9 @@ async fn run_loop(
         }
         let nonce = nonce().ok_or(Failure::Api(ApiError::Internal))?;
         let reply = {
-            let timer = Timeout::start(shared)?;
+            let timer = Timeout::start(shared, REQUEST_TIMEOUT_MS)?;
+            let mut idle = Timeout::start(shared, IDLE_TIMEOUT_MS)?;
+            let mut shown = (0.0, String::new());
             let req = api::Request {
                 key: &cfg.key,
                 model: cfg.model,
@@ -737,8 +744,20 @@ async fn run_loop(
                 history,
                 nonce: &nonce,
             };
-            let reply = api::complete(&req, &shared.controller.signal()).await;
+            let mut progress = |s: &Stream| {
+                idle.rearm();
+                let now = js_sys::Date::now();
+                if now - shown.0 >= PARTIAL_INTERVAL_MS {
+                    let text = s.text();
+                    if !text.trim().is_empty() && text != shown.1 {
+                        task.post(&Event::Partial(text.clone()));
+                        shown = (now, text);
+                    }
+                }
+            };
+            let reply = api::complete(&req, &shared.controller.signal(), &mut progress).await;
             drop(timer);
+            drop(idle);
             reply
         };
         if shared.stopped() {
@@ -795,11 +814,12 @@ async fn run_loop(
 /// Таймер запроса: по истечении прерывает задачу. Снимается при drop.
 struct Timeout {
     handle: i32,
-    _cb: Closure<dyn FnMut()>,
+    ms: i32,
+    cb: Closure<dyn FnMut()>,
 }
 
 impl Timeout {
-    fn start(shared: &Shared) -> Result<Self, Failure> {
+    fn start(shared: &Shared, ms: i32) -> Result<Self, Failure> {
         let s = shared.clone();
         let cb = Closure::<dyn FnMut()>::new(move || s.halt(Cause::TimedOut));
         // Без таймера запрос не отправляется: лимит времени обязателен.
@@ -807,12 +827,24 @@ impl Timeout {
             .and_then(|w| {
                 w.set_timeout_with_callback_and_timeout_and_arguments_0(
                     cb.as_ref().unchecked_ref(),
-                    REQUEST_TIMEOUT_MS,
+                    ms,
                 )
                 .ok()
             })
             .ok_or(Failure::Api(ApiError::Internal))?;
-        Ok(Self { handle, _cb: cb })
+        Ok(Self { handle, ms, cb })
+    }
+
+    /// Начать отсчёт заново. Если новый таймер не встал, остаётся старый.
+    fn rearm(&mut self) {
+        let Some(w) = web_sys::window() else { return };
+        if let Ok(handle) = w.set_timeout_with_callback_and_timeout_and_arguments_0(
+            self.cb.as_ref().unchecked_ref(),
+            self.ms,
+        ) {
+            w.clear_timeout_with_handle(self.handle);
+            self.handle = handle;
+        }
     }
 }
 

@@ -37,10 +37,15 @@ type Post struct {
 
 // Reply — ответ мока: тело Messages API, задержка перед ним и HTTP-статус
 // (0 — 200). Для ошибок API тело — {"type":"error","error":{...}}.
+// На запрос со "stream": true успешное тело уходит потоком SSE; Stream, если
+// задан, отправляется вместо него как есть (порченый или оборванный поток).
 type Reply struct {
 	Body   map[string]any
 	Delay  time.Duration
 	Status int
+	Stream string
+	// Pause: поток уходит по событию с этой паузой между ними.
+	Pause time.Duration
 }
 
 type Proxy struct {
@@ -174,8 +179,78 @@ func (p *Proxy) api(w *response, r *http.Request, body []byte) {
 	if reply.Status != 0 {
 		w.status = reply.Status
 	}
+	if stream, _ := parsed["stream"].(bool); stream && w.status == 200 {
+		w.header.Set("Content-Type", "text/event-stream; charset=utf-8")
+		s := reply.Stream
+		if s == "" {
+			s = sse(reply.Body)
+		}
+		if reply.Pause > 0 {
+			w.pause = reply.Pause
+			for _, ev := range strings.SplitAfter(s, "\n\n") {
+				if ev != "" {
+					w.parts = append(w.parts, ev)
+				}
+			}
+			return
+		}
+		w.body.WriteString(s)
+		return
+	}
 	w.header.Set("Content-Type", "application/json")
 	json.NewEncoder(&w.body).Encode(reply.Body)
+}
+
+// sse раскладывает готовое сообщение на события потока, как это делает API:
+// текст и JSON аргументов приходят несколькими дельтами.
+func sse(msg map[string]any) string {
+	var b strings.Builder
+	ev := func(kind string, data map[string]any) {
+		data["type"] = kind
+		j, _ := json.Marshal(data)
+		b.WriteString("event: " + kind + "\ndata: " + string(j) + "\n\n")
+	}
+	usage, _ := msg["usage"].(map[string]any)
+	ev("message_start", map[string]any{"message": map[string]any{
+		"id": "msg_e2e", "type": "message", "role": "assistant", "content": []any{},
+		"model": "e2e", "stop_reason": nil, "usage": map[string]any{"input_tokens": usage["input_tokens"], "output_tokens": 1},
+	}})
+	ev("ping", map[string]any{})
+	blocks, _ := msg["content"].([]any)
+	for i, raw := range blocks {
+		block, _ := raw.(map[string]any)
+		switch block["type"] {
+		case "text":
+			text, _ := block["text"].(string)
+			ev("content_block_start", map[string]any{"index": i, "content_block": map[string]any{"type": "text", "text": ""}})
+			for _, part := range halves(text) {
+				ev("content_block_delta", map[string]any{"index": i, "delta": map[string]any{"type": "text_delta", "text": part}})
+			}
+		case "tool_use":
+			ev("content_block_start", map[string]any{"index": i, "content_block": map[string]any{
+				"type": "tool_use", "id": block["id"], "name": block["name"], "input": map[string]any{}}})
+			input, _ := json.Marshal(block["input"])
+			for _, part := range halves(string(input)) {
+				ev("content_block_delta", map[string]any{"index": i, "delta": map[string]any{"type": "input_json_delta", "partial_json": part}})
+			}
+		default:
+			ev("content_block_start", map[string]any{"index": i, "content_block": block})
+		}
+		ev("content_block_stop", map[string]any{"index": i})
+	}
+	ev("message_delta", map[string]any{"delta": map[string]any{"stop_reason": msg["stop_reason"]},
+		"usage": map[string]any{"output_tokens": usage["output_tokens"]}})
+	ev("message_stop", map[string]any{})
+	return b.String()
+}
+
+// halves делит строку на две части по границе символа.
+func halves(s string) []string {
+	r := []rune(s)
+	if len(r) < 2 {
+		return []string{s}
+	}
+	return []string{string(r[:len(r)/2]), string(r[len(r)/2:])}
 }
 
 // reset начинает сценарий: новый скрипт мока, пустые журналы.
@@ -198,11 +273,22 @@ type response struct {
 	status int
 	header http.Header
 	body   strings.Builder
+	// parts: тело по частям (chunked) с паузой перед каждой, кроме первой.
+	parts []string
+	pause time.Duration
 }
 
 func newResponse() *response { return &response{status: 200, header: http.Header{}} }
 
 func (r *response) writeTo(w io.Writer) error {
+	if r.parts != nil {
+		resp := http.Response{
+			StatusCode: r.status, ProtoMajor: 1, ProtoMinor: 1, Header: r.header,
+			TransferEncoding: []string{"chunked"}, ContentLength: -1,
+			Body: io.NopCloser(&slowReader{parts: r.parts, pause: r.pause}),
+		}
+		return resp.Write(w)
+	}
 	resp := http.Response{
 		StatusCode:    r.status,
 		ProtoMajor:    1,
@@ -310,6 +396,13 @@ func systemPrompt(req APIRequest) string {
 // forward отправляет тело запроса расширения в настоящий Messages API с
 // ключом из окружения (ключ расширения в стенде фальшивый).
 func forward(body []byte, key string) Reply {
+	// Ответ нужен целиком для журнала; поток мок соберёт сам.
+	var parsed map[string]any
+	if json.Unmarshal(body, &parsed) != nil {
+		return Reply{Status: 400, Body: apiError("invalid_request_error")}
+	}
+	delete(parsed, "stream")
+	body, _ = json.Marshal(parsed)
 	req, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", strings.NewReader(string(body)))
 	if err != nil {
 		return Reply{Status: 500, Body: apiError("api_error")}
@@ -332,4 +425,27 @@ func forward(body []byte, key string) Reply {
 
 func apiError(kind string) map[string]any {
 	return map[string]any{"type": "error", "error": map[string]any{"type": kind, "message": "e2e"}}
+}
+
+// slowReader отдаёт части по одной за Read, с паузой перед каждой следующей.
+type slowReader struct {
+	parts []string
+	pause time.Duration
+	sent  int
+}
+
+func (s *slowReader) Read(p []byte) (int, error) {
+	if len(s.parts) == 0 {
+		return 0, io.EOF
+	}
+	if s.sent > 0 {
+		time.Sleep(s.pause)
+	}
+	n := copy(p, s.parts[0])
+	s.parts[0] = s.parts[0][n:]
+	if s.parts[0] == "" {
+		s.parts = s.parts[1:]
+		s.sent++
+	}
+	return n, nil
 }

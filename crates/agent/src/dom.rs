@@ -18,13 +18,13 @@ pub(crate) fn by_id<T: JsCast>(doc: &Document, id: &str) -> Result<T, JsValue> {
 }
 
 /// Добавляет `<div class=…>` с текстом в конец `parent`.
-pub(crate) fn append_text(parent: &Element, class: &str, text: &str) -> Result<(), JsValue> {
+pub(crate) fn append_text(parent: &Element, class: &str, text: &str) -> Result<Element, JsValue> {
     let doc = document()?;
     let el = doc.create_element("div")?;
     el.set_class_name(class);
     el.set_text_content(Some(text));
     parent.append_child(&el)?;
-    Ok(())
+    Ok(el)
 }
 
 pub(crate) fn set_disabled(el: &Element, disabled: bool) {

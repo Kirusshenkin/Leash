@@ -34,6 +34,8 @@ thread_local! {
     static WINDOW: Cell<Option<u64>> = const { Cell::new(None) };
     /// Номер запроса подтверждения, который сейчас показан.
     static PENDING: Cell<Option<u64>> = const { Cell::new(None) };
+    /// Черновик ответа, который ещё дописывается потоком.
+    static DRAFT: RefCell<Option<Element>> = const { RefCell::new(None) };
 }
 
 /// Период ping, пока ждём ответа. Меньше idle-таймаута event page (~30 с).
@@ -188,6 +190,13 @@ fn send_input() {
 
 fn on_event(msg: &JsValue) {
     let event = protocol::raw_from_js(msg).map(|raw| protocol::parse_event(&raw));
+    // Черновик без итогового ответа (ошибка, «Стоп») в диалог не попал —
+    // в панели его тоже не остаётся.
+    if !matches!(event, Some(Ok(Event::Partial(_) | Event::Reply(_))))
+        && let Some(el) = DRAFT.take()
+    {
+        el.remove();
+    }
     match event {
         Some(Ok(Event::Ready)) => {
             READY.set(true);
@@ -204,7 +213,14 @@ fn on_event(msg: &JsValue) {
         }
         Some(Ok(Event::Step(text))) => show("step", &format!("→ {text}")),
         Some(Ok(Event::Confirm { id, text })) => show_confirm(id, &text),
-        Some(Ok(Event::Reply(text))) => show("assistant", &text),
+        Some(Ok(Event::Partial(text))) => show_draft(&text),
+        Some(Ok(Event::Reply(text))) => match DRAFT.take() {
+            Some(el) => {
+                el.set_class_name("msg assistant");
+                set_text(&el, &text);
+            }
+            None => show("assistant", &text),
+        },
         Some(Ok(Event::Error(text))) => show("error", &text),
         Some(Ok(Event::Notice(text))) => show("notice", &text),
         Some(Err(_)) | None => show("error", "Отклонено некорректное сообщение от фона."),
@@ -213,16 +229,38 @@ fn on_event(msg: &JsValue) {
 }
 
 fn show(class: &str, text: &str) {
+    append(class, text);
+}
+
+fn append(class: &str, text: &str) -> Option<Element> {
+    UI.with_borrow(|ui| {
+        let u = ui.as_ref()?;
+        let text = protocol::display_text(text);
+        let el = dom::append_text(&u.log, &format!("msg {class}"), &text).ok();
+        while u.log.child_element_count() > MAX_LOG_ENTRIES {
+            match u.log.first_element_child() {
+                Some(first) => first.remove(),
+                None => break,
+            }
+        }
+        u.log.set_scroll_top(u.log.scroll_height());
+        el
+    })
+}
+
+/// Черновик ответа: обновляется на месте, пока идёт поток.
+fn show_draft(text: &str) {
+    let existing = DRAFT.with_borrow(Clone::clone);
+    match existing {
+        Some(el) => set_text(&el, text),
+        None => DRAFT.set(append("assistant draft", text)),
+    }
+}
+
+fn set_text(el: &Element, text: &str) {
+    el.set_text_content(Some(&protocol::display_text(text)));
     UI.with_borrow(|ui| {
         if let Some(u) = ui {
-            let text = protocol::display_text(text);
-            let _ = dom::append_text(&u.log, &format!("msg {class}"), &text);
-            while u.log.child_element_count() > MAX_LOG_ENTRIES {
-                match u.log.first_element_child() {
-                    Some(first) => first.remove(),
-                    None => break,
-                }
-            }
             u.log.set_scroll_top(u.log.scroll_height());
         }
     });
@@ -232,6 +270,7 @@ fn clear_log() {
     UI.with_borrow(|ui| {
         if let Some(u) = ui {
             u.log.set_text_content(None);
+            DRAFT.set(None);
         }
     });
 }

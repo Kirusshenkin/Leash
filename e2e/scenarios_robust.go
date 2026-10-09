@@ -594,5 +594,111 @@ return confirmText && confirmText.children.length > 0;`, &hasChildren); err != n
 			}
 			return expect(hasEntry(log, "assistant", "<b>Bold</b> &lt;script&gt; <img src=x>"), "текст изменён: %v", tail(log, 2))
 		}},
+
+		scenario{"R24 Ошибка посреди потока: черновик убран, задача остановлена", func(e *env) error {
+			return apiFails(e, Reply{Stream: events(
+				`{"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":1}}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ТЕКСТ-R24"}}`,
+				`{"type":"error","error":{"type":"overloaded_error","message":"x"}}`,
+			)}, "Ошибка API во время ответа: API перегружен", "ТЕКСТ-R24")
+		}},
+
+		scenario{"R25 Оборванный поток с вызовом инструмента: вызов не выполняется", func(e *env) error {
+			if err := apiFails(e, Reply{Stream: events(
+				`{"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":1}}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_r25","name":"navigate","input":{}}}`,
+				`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"url\":\"`+A+`/r25-cut\"}"}}`,
+				`{"type":"content_block_stop","index":0}`,
+				`{"type":"message_delta","delta":{"stop_reason":"tool_use"}}`,
+			)}, "Неожиданный формат ответа API"); err != nil {
+				return err
+			}
+			return expect(!e.hit("/r25-cut"), "вызов из незаконченного потока выполнен")
+		}},
+
+		scenario{"R26 Черновик виден по ходу потока, затем заменён ответом", func(e *env) error {
+			slow := func(APIRequest) Reply {
+				return Reply{Body: final("ОТВЕТ-R26 длинный текст ответа"), Pause: 400 * time.Millisecond}
+			}
+			if err := e.task(A+"/", "привет", slow); err != nil {
+				return err
+			}
+			draft := false
+			for deadline := time.Now().Add(5 * time.Second); !draft && time.Now().Before(deadline); {
+				draft = hasEntry(e.log(), "draft", "ОТВЕТ-R26")
+				time.Sleep(50 * time.Millisecond)
+			}
+			if err := expect(draft, "черновик не показан по ходу потока"); err != nil {
+				return err
+			}
+			log, err := e.waitIdle(30 * time.Second)
+			if err != nil {
+				return err
+			}
+			n := 0
+			for _, l := range log {
+				if strings.Contains(l.Text, "ОТВЕТ-R26") {
+					n++
+					if err := expect(l.Class == "msg assistant", "класс записи %q", l.Class); err != nil {
+						return err
+					}
+				}
+			}
+			return expect(n == 1, "ответ показан %d раз: %v", n, tail(log, 3))
+		}},
+		scenario{"R27 Стоп посреди потока: поток оборван, вызов из него не выполнен", func(e *env) error {
+			slow := func(APIRequest) Reply {
+				return Reply{Stream: events(
+					`{"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":1}}}`,
+					`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"ТЕКСТ-R27 "}}`,
+					`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"иду"}}`,
+					`{"type":"content_block_stop","index":0}`,
+					`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_r27","name":"navigate","input":{}}}`,
+					`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"url\":\"`+A+`/r27-stop\"}"}}`,
+					`{"type":"content_block_stop","index":1}`,
+					`{"type":"message_delta","delta":{"stop_reason":"tool_use"}}`,
+					`{"type":"message_stop"}`,
+				), Pause: time.Second}
+			}
+			if err := e.task(A+"/", "иди", slow, done("лишнее")); err != nil {
+				return err
+			}
+			for deadline := time.Now().Add(5 * time.Second); !hasEntry(e.log(), "draft", "ТЕКСТ-R27") && time.Now().Before(deadline); {
+				time.Sleep(50 * time.Millisecond)
+			}
+			start := time.Now()
+			if err := e.stop(); err != nil {
+				return err
+			}
+			log, err := e.waitIdle(30 * time.Second)
+			if err != nil {
+				return err
+			}
+			if err := expect(time.Since(start) < 3*time.Second, "остановка заняла %v", time.Since(start)); err != nil {
+				return err
+			}
+			if err := expect(hasEntry(log, "notice", "Остановлено"), "нет «Остановлено»: %v", tail(log, 3)); err != nil {
+				return err
+			}
+			if err := expect(!hasEntry(log, "", "ТЕКСТ-R27"), "черновик остался после остановки"); err != nil {
+				return err
+			}
+			time.Sleep(8 * time.Second) // поток дошёл бы до конца
+			reqs, _, _ := e.p.snapshot()
+			if err := expect(len(reqs) == 1, "после остановки %d запросов", len(reqs)); err != nil {
+				return err
+			}
+			return expect(!e.hit("/r27-stop"), "вызов из оборванного потока выполнен")
+		}},
 	)
+}
+
+// events собирает тело SSE из готовых JSON-событий.
+func events(data ...string) string {
+	var b strings.Builder
+	for _, d := range data {
+		b.WriteString("data: " + d + "\n\n")
+	}
+	return b.String()
 }
