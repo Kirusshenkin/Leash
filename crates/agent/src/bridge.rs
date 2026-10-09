@@ -144,6 +144,8 @@ async fn in_tab(tab: f64, op: &Value) -> Option<Value> {
 /// Состояние одного сеанса (одного MCP-процесса).
 #[derive(Default)]
 struct Session {
+    /// Номер сеанса у моста.
+    id: u64,
     /// Рабочая вкладка; пока не выбрана — активная вкладка пользователя.
     tab: Option<f64>,
     snapshot: Option<Snapshot>,
@@ -158,6 +160,9 @@ struct Session {
 
 thread_local! {
     static SESSIONS: RefCell<HashMap<u64, Session>> = RefCell::new(HashMap::new());
+    /// Сеанс, чей вызов сейчас выполняется (мост шлёт вызовы по одному), и
+    /// завершился ли он за время вызова.
+    static ACTIVE: RefCell<Option<(u64, bool)>> = const { RefCell::new(None) };
 }
 
 /// Результат вызова для модели.
@@ -214,13 +219,28 @@ pub(crate) async fn call_tool(session: u64, name: &str, input: &Value) -> (Strin
     let mut s = SESSIONS
         .with_borrow_mut(|m| m.remove(&session))
         .unwrap_or_default();
+    s.id = session;
+    ACTIVE.with_borrow_mut(|a| *a = Some((session, false)));
     let done = s.execute(name, input).await;
-    SESSIONS.with_borrow_mut(|m| m.insert(session, s));
+    let ended = ACTIVE
+        .with_borrow_mut(|a| a.take())
+        .is_some_and(|(_, ended)| ended);
+    if !ended {
+        SESSIONS.with_borrow_mut(|m| m.insert(session, s));
+    }
     (done.text, done.is_error)
 }
 
 /// MCP-процесс завершился: его состояние больше не нужно.
 pub(crate) fn end_session(session: u64) {
+    confirm::deny_session(session);
+    ACTIVE.with_borrow_mut(|a| {
+        if let Some((s, ended)) = a
+            && *s == session
+        {
+            *ended = true;
+        }
+    });
     SESSIONS.with_borrow_mut(|m| m.remove(&session));
 }
 
@@ -354,7 +374,7 @@ impl Session {
                 for r in &reasons {
                     text.push_str(&format!("\n• {r}"));
                 }
-                if !confirm::ask(text).await {
+                if !confirm::ask(self.id, text).await {
                     self.post(&Event::Step("действие отклонено".into()));
                     return refused(
                         "Пользователь не разрешил это действие. Не пытайся сделать то же другим способом; \

@@ -147,13 +147,15 @@ if (!inner || !inner.messageManager) { done({err: "панель не откры�
 ` + frameRun
 
 // popupScript: то же для окна подтверждения Leash; нет окна — {none: true}.
+// Если окон несколько (прошлое ещё закрывается), берётся самый новый вопрос.
 const popupScript = `
 const [code, tag] = arguments;
 const done = arguments[arguments.length - 1];
-let inner = null;
+let inner = null, best = -1;
 for (const w of Services.wm.getEnumerator("navigator:browser")) {
   const b = w.gBrowser && w.gBrowser.selectedBrowser;
-  if (b && b.currentURI.spec.includes("/confirm/confirm.html") && b.messageManager) inner = b;
+  const m = b && b.currentURI.spec.match(/\/confirm\/confirm\.html#(\d+)$/);
+  if (m && b.messageManager && Number(m[1]) > best) { best = Number(m[1]); inner = b; }
 }
 if (!inner) { done({none: true}); return; }
 ` + frameRun

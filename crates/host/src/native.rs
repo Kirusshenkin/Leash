@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use leash_core::json::{Value, parse_json};
@@ -26,6 +26,8 @@ use crate::paths;
 
 /// Дольше, чем расширение ждёт подтверждения пользователя (5 минут).
 const CALL_TIMEOUT: Duration = Duration::from_secs(330);
+/// Как часто во время вызова проверяется, жив ли MCP-клиент.
+const WATCH_EVERY: Duration = Duration::from_millis(250);
 
 /// Общее состояние: канал в Firefox и ожидающие ответа вызовы.
 struct Hub<W> {
@@ -80,10 +82,7 @@ where
             let session = sessions.fetch_add(1, Ordering::Relaxed);
             thread::spawn(move || {
                 let _ = client(&hub, conn, session);
-                hub.send(&Value::obj(vec![
-                    ("type", Value::str("end")),
-                    ("session", Value::Num(session as f64)),
-                ]));
+                hub.end(session);
             });
         }
     });
@@ -102,6 +101,40 @@ where
 }
 
 impl<W: Write> Hub<W> {
+    fn end(&self, session: u64) {
+        self.send(&Value::obj(vec![
+            ("type", Value::str("end")),
+            ("session", Value::Num(session as f64)),
+        ]));
+    }
+
+    /// Ответ расширения или `None` по таймауту. Ушедший клиент не прерывает
+    /// ожидание: после `end` расширение ответит быстро, и очередь освободится
+    /// в согласованном состоянии.
+    fn wait(
+        &self,
+        rx: &mpsc::Receiver<Value>,
+        session: u64,
+        client: &UnixStream,
+        ended: &mut bool,
+    ) -> Option<Value> {
+        let deadline = Instant::now() + CALL_TIMEOUT;
+        loop {
+            match rx.recv_timeout(WATCH_EVERY) {
+                Ok(reply) => return Some(reply),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            if !*ended && gone(client) {
+                *ended = true;
+                self.end(session);
+            }
+        }
+    }
+
     fn send(&self, msg: &Value) -> bool {
         match self.to_firefox.lock() {
             Ok(mut w) => frame::write_native(&mut *w, msg).is_ok(),
@@ -110,10 +143,20 @@ impl<W: Write> Hub<W> {
     }
 
     /// Вызов инструмента в расширении; ответ — текст и признак ошибки.
-    fn call(&self, session: u64, tool: &str, input: &Value) -> (String, bool) {
+    /// Пока вызов идёт, `client` проверяется: если MCP-клиент ушёл, расширение
+    /// сразу узнаёт об этом (`end`) и закрывает вопросы этого сеанса, а не
+    /// держит очередь до таймаута подтверждения. `None` — сеанс окончен.
+    fn call(
+        &self,
+        session: u64,
+        tool: &str,
+        input: &Value,
+        client: &UnixStream,
+    ) -> Option<(String, bool)> {
         let Ok(_turn) = self.turn.lock() else {
-            return ("Мост в неисправном состоянии.".into(), true);
+            return Some(("Мост в неисправном состоянии.".into(), true));
         };
+        let mut ended = false;
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         if let Ok(mut p) = self.pending.lock() {
@@ -127,22 +170,25 @@ impl<W: Write> Hub<W> {
             ("input", input.clone()),
         ]));
         let reply = if sent {
-            rx.recv_timeout(CALL_TIMEOUT).ok()
+            self.wait(&rx, session, client, &mut ended)
         } else {
             None
         };
         if let Ok(mut p) = self.pending.lock() {
             p.remove(&id);
         }
+        if ended {
+            return None;
+        }
         let Some(reply) = reply else {
-            return ("Firefox не ответил на вызов.".into(), true);
+            return Some(("Firefox не ответил на вызов.".into(), true));
         };
         let text = reply.get("text").and_then(Value::as_str);
         let is_error = reply.get("isError").and_then(Value::as_bool);
-        match (text, is_error) {
+        Some(match (text, is_error) {
             (Some(t), Some(e)) => (t.to_owned(), e),
             _ => ("Некорректный ответ расширения.".into(), true),
-        }
+        })
     }
 }
 
@@ -161,7 +207,12 @@ fn client<W: Write>(hub: &Hub<W>, conn: UnixStream, session: u64) -> io::Result<
         let (text, is_error) = if tools::definitions().iter().any(|t| t.name == tool)
             && matches!(input, Value::Obj(_))
         {
-            hub.call(session, tool, &input)
+            match hub.call(session, tool, &input, lines.get_ref()) {
+                Some(reply) => reply,
+                // Клиент ушёл посреди вызова. end уже отправлен; второй, после
+                // выхода из client, расширение примет как повтор и ничего не сделает.
+                None => return Ok(()),
+            }
         } else {
             ("Неизвестный вызов.".into(), true)
         };
@@ -175,6 +226,18 @@ fn client<W: Write>(hub: &Hub<W>, conn: UnixStream, session: u64) -> io::Result<
         )?;
     }
     Ok(())
+}
+
+/// Ушёл ли MCP-клиент. Пока идёт вызов, клиент ничего не шлёт (он ждёт ответа),
+/// поэтому конец потока, ошибка или лишние данные — всё значит «сеанс кончен».
+fn gone(client: &UnixStream) -> bool {
+    if client.set_nonblocking(true).is_err() {
+        return true;
+    }
+    let mut byte = [0u8; 1];
+    let result = (&*client).read(&mut byte);
+    let restored = client.set_nonblocking(false).is_ok();
+    !restored || !matches!(result, Err(ref e) if e.kind() == io::ErrorKind::WouldBlock)
 }
 
 #[cfg(test)]
@@ -246,6 +309,60 @@ mod tests {
                 .any(|m| m.get("type").and_then(Value::as_str) == Some("end")
                     && m.get("session") == calls[0].get("session"))
         );
+    }
+
+    #[test]
+    fn client_gone_mid_call_ends_session_at_once() {
+        let home = TempHome::new("gn");
+        let sock = home.0.join("s.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let (host_side, mut ext) = UnixStream::pair().unwrap();
+        let reader = host_side.try_clone().unwrap();
+        thread::spawn(move || serve(listener, reader, host_side));
+
+        // Клиент шлёт вызов и уходит, не дождавшись ответа (вопрос висит).
+        let mut a = UnixStream::connect(&sock).unwrap();
+        let req = Value::obj(vec![
+            ("id", Value::Num(1.0)),
+            ("tool", Value::str("click")),
+            ("input", Value::obj(vec![("element", Value::Num(1.0))])),
+        ]);
+        frame::write_line(&mut a, &req).unwrap();
+        let mut from_host = ext.try_clone().unwrap();
+        let mut next = || frame::read_native(&mut from_host).unwrap().unwrap();
+        assert_eq!(next().get("type").and_then(Value::as_str), Some("hello"));
+        let call = next();
+        let session = call.get("session").cloned();
+        drop(a);
+
+        // end приходит, пока вызов ещё не отвечен.
+        let end = next();
+        assert_eq!(end.get("type").and_then(Value::as_str), Some("end"));
+        assert_eq!(end.get("session").cloned(), session);
+
+        // Расширение отвечает отказом — очередь свободна для другого сеанса.
+        let reply = Value::obj(vec![
+            ("id", call.get("id").unwrap().clone()),
+            ("text", Value::str("отклонено")),
+            ("isError", Value::Bool(true)),
+        ]);
+        frame::write_native(&mut ext, &reply).unwrap();
+        let mut b = Firefox::new(sock);
+        let answer = thread::spawn(move || b.call("read_page", &Value::Obj(vec![])));
+        let msg = loop {
+            let m = next();
+            if m.get("type").and_then(Value::as_str) == Some("call") {
+                break m;
+            }
+        };
+        assert_ne!(msg.get("session").cloned(), session);
+        let ok = Value::obj(vec![
+            ("id", msg.get("id").unwrap().clone()),
+            ("text", Value::str("ok")),
+            ("isError", Value::Bool(false)),
+        ]);
+        frame::write_native(&mut ext, &ok).unwrap();
+        assert_eq!(answer.join().unwrap(), ("ok".into(), false));
     }
 
     #[test]

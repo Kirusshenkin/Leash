@@ -25,6 +25,8 @@ const TIMEOUT_MS: i32 = 300_000;
 const ARM_DELAY_MS: i32 = 800;
 
 struct Pending {
+    /// Сеанс Claude, чей это вопрос: сеанс кончился — вопрос закрывается отказом.
+    session: u64,
     text: String,
     resolve: Function,
     window: Option<f64>,
@@ -35,8 +37,8 @@ thread_local! {
     static PENDING: RefCell<HashMap<u64, Pending>> = RefCell::new(HashMap::new());
 }
 
-/// Вопрос пользователю; `true` — только явное «Разрешить».
-pub(crate) async fn ask(text: String) -> bool {
+/// Вопрос пользователю от сеанса `session`; `true` — только явное «Разрешить».
+pub(crate) async fn ask(session: u64, text: String) -> bool {
     let id = background::next_id();
     let promise = Promise::new(&mut |resolve, _| {
         if let Some(w) = web_sys::window() {
@@ -50,6 +52,7 @@ pub(crate) async fn ask(text: String) -> bool {
             p.insert(
                 id,
                 Pending {
+                    session,
                     text: text.clone(),
                     resolve,
                     window: None,
@@ -126,6 +129,20 @@ fn close(e: Pending) {
 /// «Стоп»: все открытые вопросы — «нет».
 pub(crate) fn deny_all() {
     let ids: Vec<u64> = PENDING.with_borrow(|p| p.keys().copied().collect());
+    for id in ids {
+        answer(id, false);
+    }
+}
+
+/// Сеанс Claude завершился: его вопросы — «нет». Иначе согласие выполнило бы
+/// действие, которого уже никто не ждёт.
+pub(crate) fn deny_session(session: u64) {
+    let ids: Vec<u64> = PENDING.with_borrow(|p| {
+        p.iter()
+            .filter(|(_, e)| e.session == session)
+            .map(|(id, _)| *id)
+            .collect()
+    });
     for id in ids {
         answer(id, false);
     }
