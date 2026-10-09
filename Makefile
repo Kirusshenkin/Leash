@@ -13,15 +13,18 @@ VERSION := $(shell sed -n 's/.*"version": "\([0-9.]*\)".*/\1/p' extension/manife
 # wasm-bindgen-cli обязан совпадать с версией крейта из Cargo.lock.
 BINDGEN_VERSION := $(shell grep -A1 '^name = "wasm-bindgen"$$' Cargo.lock | sed -n 's/version = "\(.*\)"/\1/p')
 
-.PHONY: all build test lint static deny audit check zip source hooks clean e2e
+.PHONY: all build host test lint static deny audit check zip source hooks clean e2e
 
 all: check
 
 build:
 	@$(WASM_BINDGEN) --version | grep -qx "wasm-bindgen $(BINDGEN_VERSION)" || \
 		{ echo "нужен wasm-bindgen-cli $(BINDGEN_VERSION): cargo install wasm-bindgen-cli --version '=$(BINDGEN_VERSION)' --locked"; exit 1; }
-	$(CARGO) build --locked --offline --release --target $(TARGET)
+	$(CARGO) build --locked --offline --release --target $(TARGET) -p leash
 	$(WASM_BINDGEN) --target web --no-typescript --out-dir $(PKG) $(WASM)
+
+host:
+	$(CARGO) build --locked --offline --release -p leash-host
 
 test:
 	$(CARGO) test --locked --offline
@@ -29,7 +32,7 @@ test:
 lint:
 	$(CARGO) fmt --all --check
 	$(CARGO) clippy --locked --offline --all-targets -- -D warnings
-	$(CARGO) clippy --locked --offline --target $(TARGET) -- -D warnings
+	$(CARGO) clippy --locked --offline --target $(TARGET) -p leash -- -D warnings
 
 static: build
 	sh scripts/check-static.sh

@@ -194,18 +194,30 @@ fn prop(kind: &str, description: &str) -> Value {
     ])
 }
 
-fn tool(name: &str, description: &str, input_schema: Value) -> Value {
-    Value::obj(vec![
-        ("name", Value::str(name)),
-        ("description", Value::str(description)),
-        ("input_schema", input_schema),
-    ])
+/// Инструмент, как его видит модель.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolDef {
+    pub name: &'static str,
+    pub description: &'static str,
+    /// JSON Schema входа.
+    pub schema: Value,
+    /// Только читает: не меняет ни страницу, ни вкладки.
+    pub read_only: bool,
 }
 
-/// Описание инструментов для API.
-pub fn definitions() -> Value {
+fn tool(name: &'static str, description: &'static str, schema: Value) -> ToolDef {
+    ToolDef {
+        name,
+        description,
+        schema,
+        read_only: matches!(name, "read_page" | "list_tabs" | "scroll"),
+    }
+}
+
+/// Все инструменты в постоянном порядке.
+pub fn definitions() -> Vec<ToolDef> {
     let element = || prop("integer", "Номер элемента из последнего снимка read_page.");
-    Value::Arr(vec![
+    vec![
         tool(
             "read_page",
             "Снимок текущей вкладки: адрес, заголовок, интерактивные элементы с номерами и видимый текст. \
@@ -285,7 +297,7 @@ pub fn definitions() -> Value {
                 &["tab"],
             ),
         ),
-    ])
+    ]
 }
 
 #[cfg(test)]
@@ -415,13 +427,7 @@ mod tests {
 
     #[test]
     fn every_defined_tool_parses_by_name() {
-        let defs = definitions();
-        let names: Vec<&str> = defs
-            .as_arr()
-            .unwrap()
-            .iter()
-            .map(|t| t.get("name").and_then(Value::as_str).unwrap())
-            .collect();
+        let names: Vec<&str> = definitions().iter().map(|t| t.name).collect();
         assert_eq!(names.len(), 9);
         for name in names {
             assert_ne!(
@@ -891,29 +897,16 @@ mod tests {
 
     #[test]
     fn definitions_schema_sanity() {
-        let defs = definitions();
-        let tools = defs.as_arr().unwrap();
-
-        // Should have 9 tools
+        let tools = definitions();
         assert_eq!(tools.len(), 9);
 
-        for tool in tools {
-            // Every tool should be an object
-            assert!(matches!(tool, Value::Obj(_)));
+        for tool in &tools {
+            let name = tool.name;
+            assert!(!tool.name.is_empty(), "tool has empty name");
+            assert!(!tool.description.is_empty(), "tool has empty description");
 
-            // Every tool needs name, description, input_schema
-            let name = tool.get("name").and_then(Value::as_str);
-            let desc = tool.get("description").and_then(Value::as_str);
-            let schema = tool.get("input_schema");
-
-            assert!(name.is_some(), "tool missing name");
-            assert!(desc.is_some(), "tool missing description");
-            assert!(schema.is_some(), "tool missing input_schema");
-            assert!(!name.unwrap().is_empty(), "tool has empty name");
-            assert!(!desc.unwrap().is_empty(), "tool has empty description");
-
-            // input_schema must be object with type, properties, required, additionalProperties
-            let schema = schema.unwrap();
+            // Схема: объект с type, properties, required, additionalProperties.
+            let schema = &tool.schema;
             assert_eq!(schema.get("type").and_then(Value::as_str), Some("object"));
             assert!(matches!(schema.get("properties"), Some(Value::Obj(_))));
             assert!(schema.get("required").and_then(Value::as_arr).is_some());
@@ -921,7 +914,7 @@ mod tests {
                 schema.get("additionalProperties").and_then(Value::as_bool),
                 Some(false),
                 "tool {}: additionalProperties must be false",
-                name.unwrap()
+                name
             );
 
             // Verify required fields are subset of properties
@@ -936,7 +929,7 @@ mod tests {
                     assert!(
                         prop_names.contains(&req_name),
                         "tool {}: required field {} not in properties",
-                        name.unwrap(),
+                        name,
                         req_name
                     );
                 }
@@ -945,13 +938,19 @@ mod tests {
     }
 
     #[test]
-    fn tool_names_are_unique() {
-        let defs = definitions();
-        let tools = defs.as_arr().unwrap();
-        let names: Vec<&str> = tools
+    fn read_only_tools() {
+        let ro: Vec<&str> = definitions()
             .iter()
-            .filter_map(|t| t.get("name").and_then(Value::as_str))
+            .filter(|t| t.read_only)
+            .map(|t| t.name)
             .collect();
+        assert_eq!(ro, ["read_page", "scroll", "list_tabs"]);
+    }
+
+    #[test]
+    fn tool_names_are_unique() {
+        let tools = definitions();
+        let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
 
         assert_eq!(names.len(), tools.len(), "duplicate tool names");
 

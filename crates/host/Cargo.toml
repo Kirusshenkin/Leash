@@ -1,0 +1,15 @@
+[package]
+name = "leash-host"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Мост между Claude (MCP по stdio) и расширением (native messaging).
+# Только std и leash-core: без сети, без async-рантайма.
+[dependencies]
+leash-core = { path = "../core", version = "=0.1.0" }
+
+[[bin]]
+name = "leash-host"
+path = "src/main.rs"

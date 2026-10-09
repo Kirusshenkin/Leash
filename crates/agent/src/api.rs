@@ -457,7 +457,21 @@ pub(crate) fn request_body(req: &Request<'_>) -> String {
         ("max_tokens", Value::Num(f64::from(req.max_tokens))),
         ("stream", Value::Bool(true)),
         ("system", Value::str(system_prompt(req.nonce))),
-        ("tools", tools::definitions()),
+        (
+            "tools",
+            Value::Arr(
+                tools::definitions()
+                    .into_iter()
+                    .map(|t| {
+                        Value::obj(vec![
+                            ("name", Value::str(t.name)),
+                            ("description", Value::str(t.description)),
+                            ("input_schema", t.schema),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
         ("messages", Value::Arr(messages)),
     ])
     .to_json()
