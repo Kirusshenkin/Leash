@@ -1,5 +1,5 @@
-//! Страница настроек. Ключ только записывается: страница его не читает,
-//! а показывает подсказку из последних 4 символов.
+//! Страница настроек: списки разрешённых и запрещённых сайтов, проверка
+//! адреса и подсказка, как подключить мост.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -7,22 +7,15 @@ use std::rc::Rc;
 use js_sys::futures::{JsFuture, spawn_local};
 use js_sys::{Object, Promise};
 use wasm_bindgen::prelude::*;
-use web_sys::{Element, HtmlElement, HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement};
+use web_sys::{Element, HtmlElement, HtmlInputElement, HtmlTextAreaElement};
 
 use crate::dom;
 use crate::ext;
 use crate::policy::{self, Access, Policy};
-use crate::settings::{self, ApiKey, MaxTokensError};
-
-/// Обязательное разрешение из манифеста; его не убираем.
-const API_PATTERN: &str = "https://api.anthropic.com/*";
+use crate::settings;
 
 #[derive(Clone)]
 struct Page {
-    key: HtmlInputElement,
-    key_status: Element,
-    model: HtmlSelectElement,
-    max_tokens: HtmlInputElement,
     allow: HtmlTextAreaElement,
     deny: HtmlTextAreaElement,
     probe: HtmlInputElement,
@@ -36,10 +29,6 @@ struct Page {
 pub fn start_options() -> Result<(), JsValue> {
     let doc = dom::document()?;
     let page = Page {
-        key: dom::by_id(&doc, "key")?,
-        key_status: dom::by_id(&doc, "key-status")?,
-        model: dom::by_id(&doc, "model")?,
-        max_tokens: dom::by_id(&doc, "max-tokens")?,
         allow: dom::by_id(&doc, "allow")?,
         deny: dom::by_id(&doc, "deny")?,
         probe: dom::by_id(&doc, "probe")?,
@@ -53,33 +42,7 @@ pub fn start_options() -> Result<(), JsValue> {
         li.set_text_content(Some(&format!("{domain} — {}", category.describe())));
         builtin.append_child(&li)?;
     }
-    for m in settings::MODELS {
-        let opt = doc.create_element("option")?;
-        opt.set_attribute("value", m)?;
-        opt.set_text_content(Some(m));
-        page.model.append_child(&opt)?;
-    }
-    page.model.set_value(settings::MODELS[0]);
-    page.max_tokens
-        .set_value(&settings::MAX_TOKENS_DEFAULT.to_string());
-
-    let save_key: HtmlElement = dom::by_id(&doc, "save-key")?;
-    let clear_key: HtmlElement = dom::by_id(&doc, "clear-key")?;
-    let save: HtmlElement = dom::by_id(&doc, "save")?;
     let save_sites: HtmlElement = dom::by_id(&doc, "save-sites")?;
-
-    let p = page.clone();
-    dom::on(&save_key, "click", move |_| {
-        spawn_local(store_key(p.clone()))
-    })?;
-    let p = page.clone();
-    dom::on(&clear_key, "click", move |_| {
-        spawn_local(remove_key(p.clone()))
-    })?;
-    let p = page.clone();
-    dom::on(&save, "click", move |_| {
-        spawn_local(store_settings(p.clone()))
-    })?;
     let p = page.clone();
     dom::on(&save_sites, "click", move |_| save_sites_clicked(&p))?;
     let p = page.clone();
@@ -91,14 +54,6 @@ pub fn start_options() -> Result<(), JsValue> {
 
 fn say(page: &Page, text: &str) {
     page.message.set_text_content(Some(text));
-}
-
-fn show_hint(page: &Page, hint: Option<&str>) {
-    let text = match hint {
-        Some(h) => format!("Ключ задан: …{h}"),
-        None => "Ключ не задан.".to_owned(),
-    };
-    page.key_status.set_text_content(Some(&text));
 }
 
 async fn granted_origins() -> Vec<String> {
@@ -119,43 +74,15 @@ async fn granted_origins() -> Vec<String> {
 }
 
 async fn load(page: Page) {
-    // Этап 1 хранил ключ в storage.local, доступной content-скриптам.
-    let legacy = ext::strings(&[settings::KEY_API_KEY, settings::KEY_API_KEY_HINT]);
-    let _ = JsFuture::from(ext::storage_local_remove(&legacy)).await;
+    let _ = JsFuture::from(ext::storage_local_remove(&ext::strings(
+        settings::LEGACY_KEYS,
+    )))
+    .await;
 
-    // Сам ключ сюда не читается.
-    let hint = match ext::storage_session_get(&ext::strings(&[settings::KEY_API_KEY_HINT])) {
-        Ok(p) => JsFuture::from(p)
-            .await
-            .ok()
-            .and_then(|s| ext::get(&s, settings::KEY_API_KEY_HINT))
-            .and_then(|v| v.as_string()),
-        Err(_) => None,
-    };
-    // Подсказку тоже проверяем: только 4 безопасных символа.
-    let hint = hint.filter(|h| {
-        h.len() == 4
-            && h.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    });
-    show_hint(&page, hint.as_deref());
-
-    let names = ext::strings(&[
-        settings::KEY_MODEL,
-        settings::KEY_MAX_TOKENS,
-        settings::KEY_ALLOW_ORIGINS,
-        settings::KEY_DENY_HOSTS,
-    ]);
+    let names = ext::strings(&[settings::KEY_ALLOW_ORIGINS, settings::KEY_DENY_HOSTS]);
     let Ok(stored) = JsFuture::from(ext::storage_local_get(&names)).await else {
         return say(&page, "Не удалось прочитать настройки.");
     };
-    let model = ext::get(&stored, settings::KEY_MODEL).and_then(|v| v.as_string());
-    page.model
-        .set_value(settings::model_from_storage(model.as_deref()));
-    let max_tokens = ext::get(&stored, settings::KEY_MAX_TOKENS).and_then(|v| v.as_f64());
-    page.max_tokens
-        .set_value(&settings::max_tokens_from_storage(max_tokens).to_string());
-
     let text = |key| {
         ext::get(&stored, key)
             .and_then(|v| v.as_string())
@@ -231,7 +158,7 @@ async fn store_sites(page: Page, parsed: Policy, wanted: Vec<String>, request: O
     let extra: Vec<String> = granted_origins()
         .await
         .into_iter()
-        .filter(|o| o != API_PATTERN && !wanted.contains(o))
+        .filter(|o| !wanted.contains(o))
         .collect();
     if !extra.is_empty()
         && let Ok(p) = ext::permissions_remove(&ext::origins(&extra))
@@ -262,76 +189,4 @@ fn show_probe(page: &Page) {
         }
     };
     page.probe_result.set_text_content(Some(&text));
-}
-
-async fn store_key(page: Page) {
-    let key = match ApiKey::parse(&page.key.value()) {
-        Ok(k) => k,
-        Err(e) => return say(&page, e.describe()),
-    };
-    let items = Object::new();
-    ext::set(
-        &items,
-        settings::KEY_API_KEY,
-        &JsValue::from_str(key.expose()),
-    );
-    ext::set(
-        &items,
-        settings::KEY_API_KEY_HINT,
-        &JsValue::from_str(&key.hint()),
-    );
-    page.key.set_value("");
-    let saved = match ext::storage_session_set(&items) {
-        Ok(p) => JsFuture::from(p).await.is_ok(),
-        Err(_) => false,
-    };
-    if saved {
-        show_hint(&page, Some(&key.hint()));
-        say(&page, "Ключ сохранён до закрытия Firefox.");
-    } else {
-        say(&page, "Не удалось сохранить ключ.");
-    }
-}
-
-async fn remove_key(page: Page) {
-    let names = ext::strings(&[settings::KEY_API_KEY, settings::KEY_API_KEY_HINT]);
-    let removed = match ext::storage_session_remove(&names) {
-        Ok(p) => JsFuture::from(p).await.is_ok(),
-        Err(_) => false,
-    };
-    if removed {
-        show_hint(&page, None);
-        say(&page, "Ключ удалён.");
-    } else {
-        say(&page, "Не удалось удалить ключ.");
-    }
-}
-
-async fn store_settings(page: Page) {
-    let Some(model) = settings::parse_model(&page.model.value()) else {
-        return say(&page, "Неизвестная модель.");
-    };
-    let max_tokens = match settings::parse_max_tokens(&page.max_tokens.value()) {
-        Ok(n) => n,
-        Err(MaxTokensError::NotANumber) => {
-            return say(&page, "Лимит токенов должен быть целым числом.");
-        }
-        Err(MaxTokensError::OutOfRange) => {
-            return say(
-                &page,
-                &format!(
-                    "Лимит токенов: от {} до {}.",
-                    settings::MAX_TOKENS_MIN,
-                    settings::MAX_TOKENS_MAX
-                ),
-            );
-        }
-    };
-    let items = Object::new();
-    ext::set(&items, settings::KEY_MODEL, &JsValue::from_str(model));
-    ext::set(&items, settings::KEY_MAX_TOKENS, &JsValue::from(max_tokens));
-    match JsFuture::from(ext::storage_local_set(&items)).await {
-        Ok(_) => say(&page, "Настройки сохранены."),
-        Err(_) => say(&page, "Не удалось сохранить настройки."),
-    }
 }

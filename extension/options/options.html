@@ -11,30 +11,18 @@
   <h1>Leash — настройки</h1>
 
   <section>
-    <h2>Ключ API Anthropic</h2>
-    <p class="hint">Ключ создаётся в консоли Anthropic: platform.claude.com → Settings → API keys.
-      Вход через аккаунт claude.ai невозможен: Anthropic не разрешает сторонним расширениям
-      работать по подписке. Заведите для Leash отдельный ключ, задайте ему короткий срок
-      действия (консоль предлагает от 1 до 30 дней) и лимит расходов.</p>
-    <p class="hint">Ключ хранится в storage.session: он недоступен скриптам на страницах, не показывается после
-      сохранения и стирается при закрытии Firefox — после перезапуска его нужно ввести снова.</p>
-    <p id="key-status"></p>
-    <input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…">
-    <div class="buttons">
-      <button id="save-key" type="button">Сохранить ключ</button>
-      <button id="clear-key" type="button">Удалить ключ</button>
-    </div>
-  </section>
-
-  <section>
-    <h2>Модель</h2>
-    <label for="model">Модель</label>
-    <select id="model"></select>
-    <label for="max-tokens">Лимит токенов ответа</label>
-    <input id="max-tokens" type="number" min="256" max="8192" step="1">
-    <div class="buttons">
-      <button id="save" type="button">Сохранить</button>
-    </div>
+    <h2>Мост к Claude</h2>
+    <p class="hint">Claude Code или Claude Desktop управляют Firefox через программу leash-host.
+      Расширение само ни с кем по сети не связывается: страницы уходят только в мост, а из него —
+      в Claude, которым вы пользуетесь. Ключ API не нужен.</p>
+    <ol class="hint">
+      <li>Установите мост: <code>leash-host install</code>, затем перезапустите Firefox.</li>
+      <li>Подключите его к Claude Code: <code>claude mcp add --scope user leash -- &lt;путь к leash-host&gt; mcp</code>
+        (точную команду печатает <code>leash-host install</code>).</li>
+      <li>Разрешите ниже сайты, на которых Claude может работать.</li>
+    </ol>
+    <p class="hint">Опасные действия Claude подтверждаете вы в отдельном окне Leash. Пароли, данные
+      карт, одноразовые коды и CAPTCHA вводите сами: Claude они недоступны.</p>
   </section>
 
   <section>

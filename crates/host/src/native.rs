@@ -66,6 +66,11 @@ where
         turn: Mutex::new(()),
         next: AtomicU64::new(1),
     });
+    // Приветствие: расширение показывает «мост подключён» только после него.
+    hub.send(&Value::obj(vec![
+        ("type", Value::str("hello")),
+        ("version", Value::str(env!("CARGO_PKG_VERSION"))),
+    ]));
     let accept_hub = Arc::clone(&hub);
     thread::spawn(move || {
         let sessions = AtomicU64::new(1);

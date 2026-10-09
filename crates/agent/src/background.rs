@@ -1,8 +1,8 @@
-//! Background: принимает порт панели, ведёт диалог, запускает задачи агента.
+//! Background: держит порт моста (native messaging), выполняет вызовы
+//! Claude через `bridge`, принимает порты панели и окна подтверждения.
 //!
-//! Закрытие панели (порта) прерывает задачу. Открытый порт сам по себе НЕ
-//! держит event page живой: пока идёт задача, панель шлёт `ping`, и каждое
-//! входящее сообщение сбрасывает idle-таймер Firefox.
+//! Открытый native-порт не даёт Firefox выгрузить event page (Firefox 104+),
+//! поэтому, пока мост подключён, состояние сеансов живёт в памяти.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -11,35 +11,20 @@ use js_sys::Function;
 use js_sys::futures::spawn_local;
 use wasm_bindgen::prelude::*;
 
-use crate::agent::{self, Shared};
-use crate::api::{self, Turn};
+use crate::bridge;
+use crate::confirm;
 use crate::ext::{self, Port};
-use crate::protocol::{self, Command, Event, Rejected};
-use crate::settings;
-
-/// Почему задача остановлена извне цикла.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Cause {
-    None,
-    Stopped,
-    TimedOut,
-    Looping,
-}
-
-struct Session {
-    port: Port,
-    history: Vec<Turn>,
-    task: Option<Shared>,
-}
-
-impl Session {
-    fn post(&self, event: &Event) {
-        self.port.post(&protocol::event_to_js(event));
-    }
-}
+use crate::protocol::{self, Command, Event, Native};
+use crate::value;
 
 thread_local! {
-    static SESSIONS: RefCell<HashMap<u64, Session>> = RefCell::new(HashMap::new());
+    static NATIVE: RefCell<Option<Port>> = const { RefCell::new(None) };
+    static SIDEBARS: RefCell<HashMap<u64, Port>> = RefCell::new(HashMap::new());
+    static PAUSED: Cell<bool> = const { Cell::new(false) };
+    /// Мост поздоровался: порт открыт и процесс моста работает.
+    static GREETED: Cell<bool> = const { Cell::new(false) };
+    /// Последнее состояние моста для новых панелей.
+    static STATUS: RefCell<String> = RefCell::new("Мост не подключён.".into());
     static NEXT_ID: Cell<u64> = const { Cell::new(1) };
 }
 
@@ -51,170 +36,176 @@ pub(crate) fn next_id() -> u64 {
     })
 }
 
-/// Событие в панель сессии, если она ещё открыта.
-pub(crate) fn post(id: u64, event: &Event) {
-    with_session(id, |s| s.post(event));
+/// Остановлен ли Leash пользователем.
+pub(crate) fn paused() -> bool {
+    PAUSED.get()
+}
+
+/// Событие во все открытые панели.
+pub(crate) fn broadcast(event: &Event) {
+    let msg = protocol::to_js(&protocol::event_value(event));
+    SIDEBARS.with_borrow(|s| {
+        for port in s.values() {
+            port.post(&msg);
+        }
+    });
+}
+
+fn status_event() -> Event {
+    Event::Status {
+        connected: GREETED.get() && NATIVE.with_borrow(Option::is_some),
+        paused: PAUSED.get(),
+        text: STATUS.with_borrow(Clone::clone),
+    }
+}
+
+fn set_status(text: &str) {
+    STATUS.with_borrow_mut(|s| *s = text.to_owned());
+    broadcast(&status_event());
+}
+
+/// Подключение к мосту; вызывается при загрузке background и по кнопке.
+#[wasm_bindgen]
+pub fn start_bridge() {
+    if NATIVE.with_borrow(Option::is_some) {
+        return;
+    }
+    let port = match ext::runtime_connect_native(leash_core::NATIVE_APP) {
+        Ok(p) => p,
+        Err(_) => return set_status("Не удалось запустить мост."),
+    };
+    let on_message: Function =
+        Closure::<dyn FnMut(JsValue)>::new(move |msg: JsValue| on_native(&msg))
+            .into_js_value()
+            .unchecked_into();
+    let on_disconnect: Function = Closure::<dyn FnMut(JsValue)>::new(move |p: JsValue| {
+        NATIVE.with_borrow_mut(|n| *n = None);
+        GREETED.set(false);
+        // Причину Firefox кладёт в port.error: обычно мост не установлен.
+        let detail = ext::get(&p, "error")
+            .and_then(|e| ext::get(&e, "message"))
+            .and_then(|m| m.as_string())
+            .unwrap_or_default();
+        set_status(&format!(
+            "Мост не подключён{}. Установите его: leash-host install, затем перезапустите Firefox.",
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", protocol::display_text(&detail))
+            }
+        ));
+    })
+    .into_js_value()
+    .unchecked_into();
+    port.on_message().add_listener(&on_message);
+    port.on_disconnect().add_listener(&on_disconnect);
+    NATIVE.with_borrow_mut(|n| *n = Some(port));
+    set_status("Подключаюсь к мосту…");
+}
+
+fn on_native(msg: &JsValue) {
+    match value::from_js(msg).and_then(|v| protocol::parse_native(&v)) {
+        Some(Native::Call {
+            id,
+            session,
+            tool,
+            input,
+        }) => spawn_local(async move {
+            let (text, is_error) = bridge::call_tool(session, &tool, &input).await;
+            let reply = protocol::to_js(&protocol::native_reply(id, &text, is_error));
+            NATIVE.with_borrow(|n| {
+                if let Some(port) = n {
+                    port.post(&reply);
+                }
+            });
+        }),
+        Some(Native::End { session }) => bridge::end_session(session),
+        Some(Native::Hello { version }) => {
+            GREETED.set(true);
+            set_status(&format!(
+                "Мост {version} подключён: Claude может работать на разрешённых сайтах."
+            ))
+        }
+        // Мост — наш процесс; мусор от него игнорируется, а не исполняется.
+        None => {}
+    }
 }
 
 /// Вызывается JS-мостом на `runtime.onConnect`.
 #[wasm_bindgen]
 pub fn on_connect(port: Port) {
     let own_id = ext::runtime_id().unwrap_or_default();
-    let sidebar_url = ext::runtime_get_url("sidebar/sidebar.html");
     let sender = protocol::sender_from_js(&port.sender());
-    if !protocol::is_sidebar_sender(&port.name(), &sender, &own_id, &sidebar_url) {
-        port.disconnect();
-        return;
+    let sidebar_url = ext::runtime_get_url("sidebar/sidebar.html");
+    if protocol::is_sidebar_sender(&port.name(), &sender, &own_id, &sidebar_url) {
+        return open_sidebar(port);
     }
-    forget_legacy_key();
+    let confirm_url = ext::runtime_get_url("confirm/confirm.html");
+    match protocol::confirm_sender(&port.name(), &sender, &own_id, &confirm_url) {
+        Some(id) => confirm::on_connect(port, id),
+        None => port.disconnect(),
+    }
+}
 
+fn open_sidebar(port: Port) {
     let id = next_id();
-    // Слушатели отдаются во владение JS: освобождаются вместе с портом.
     let on_message: Function =
-        Closure::<dyn FnMut(JsValue)>::new(move |msg: JsValue| handle_message(id, &msg))
+        Closure::<dyn FnMut(JsValue)>::new(move |msg: JsValue| on_sidebar(id, &msg))
             .into_js_value()
             .unchecked_into();
-    let on_disconnect: Function =
-        Closure::<dyn FnMut(JsValue)>::new(move |_: JsValue| close_session(id))
-            .into_js_value()
-            .unchecked_into();
-
-    SESSIONS.with_borrow_mut(|s| {
-        s.insert(
-            id,
-            Session {
-                port: port.clone(),
-                history: Vec::new(),
-                task: None,
-            },
-        );
-    });
+    let on_disconnect: Function = Closure::<dyn FnMut(JsValue)>::new(move |_: JsValue| {
+        SIDEBARS.with_borrow_mut(|s| s.remove(&id));
+    })
+    .into_js_value()
+    .unchecked_into();
     port.on_message().add_listener(&on_message);
     port.on_disconnect().add_listener(&on_disconnect);
-    port.post(&protocol::event_to_js(&Event::Ready));
+    port.post(&protocol::to_js(&protocol::event_value(&status_event())));
+    SIDEBARS.with_borrow_mut(|s| s.insert(id, port));
+    // Панель открыли — хороший момент попробовать подключиться снова.
+    start_bridge();
+}
+
+fn on_sidebar(id: u64, msg: &JsValue) {
+    match value::from_js(msg).and_then(|v| protocol::parse_command(&v)) {
+        Some(Command::Stop) => stop(),
+        Some(Command::Resume) => {
+            PAUSED.set(false);
+            broadcast(&Event::Notice(
+                "Leash снова принимает команды Claude.".into(),
+            ));
+            broadcast(&status_event());
+        }
+        Some(Command::Connect) => start_bridge(),
+        Some(Command::Reset) => {
+            bridge::forget_all();
+            broadcast(&Event::Notice(
+                "Сеансы сброшены: прочитанные сайты и признаки инъекций забыты.".into(),
+            ));
+        }
+        // Нарушение протокола своей же панелью: порт закрывается.
+        None => {
+            if let Some(port) = SIDEBARS.with_borrow_mut(|s| s.remove(&id)) {
+                port.disconnect();
+            }
+        }
+    }
+}
+
+fn stop() {
+    PAUSED.set(true);
+    confirm::deny_all();
+    broadcast(&Event::Notice(
+        "Остановлено. Claude получит отказ на каждый вызов, пока вы не нажмёте «Продолжить»."
+            .into(),
+    ));
+    broadcast(&status_event());
 }
 
 /// Горячая клавиша аварийной остановки (manifest `commands`).
 #[wasm_bindgen]
 pub fn on_command(name: &str) {
-    if name != "leash-stop" {
-        return;
+    if name == "leash-stop" {
+        stop();
     }
-    SESSIONS.with_borrow(|s| {
-        for session in s.values() {
-            if let Some(task) = &session.task {
-                task.halt(Cause::Stopped);
-            }
-        }
-    });
-}
-
-/// Этап 1 хранил ключ в `storage.local`, доступной content-скриптам.
-fn forget_legacy_key() {
-    let _ = ext::storage_local_remove(&ext::strings(&[
-        settings::KEY_API_KEY,
-        settings::KEY_API_KEY_HINT,
-    ]));
-}
-
-fn close_session(id: u64) {
-    let session = SESSIONS.with_borrow_mut(|s| s.remove(&id));
-    if let Some(task) = session.and_then(|s| s.task) {
-        task.halt(Cause::Stopped);
-    }
-}
-
-/// Нарушение протокола от собственной панели: это баг или компрометация,
-/// поэтому сессия закрывается целиком.
-fn drop_session(id: u64) {
-    let session = SESSIONS.with_borrow_mut(|s| s.remove(&id));
-    if let Some(session) = session {
-        if let Some(task) = &session.task {
-            task.halt(Cause::Stopped);
-        }
-        session.port.disconnect();
-    }
-}
-
-fn handle_message(id: u64, msg: &JsValue) {
-    let Some(raw) = protocol::raw_from_js(msg) else {
-        return drop_session(id);
-    };
-    match protocol::parse_command(&raw) {
-        Ok(Command::Chat { text, window }) => start_task(id, text, window),
-        Ok(Command::Stop) => with_session(id, |s| {
-            if let Some(task) = &s.task {
-                task.halt(Cause::Stopped);
-            }
-        }),
-        Ok(Command::Reset) => reset(id),
-        Ok(Command::Confirm { id: confirm, allow }) => with_session(id, |s| {
-            if let Some(task) = &s.task {
-                task.answer(Some(confirm), allow);
-            }
-        }),
-        // Само получение сообщения продлевает жизнь event page.
-        Ok(Command::Ping) => {}
-        Err(Rejected::EmptyText) => {}
-        Err(Rejected::TextTooLong) => with_session(id, |s| {
-            s.post(&Event::Error("Сообщение слишком длинное.".into()));
-        }),
-        Err(Rejected::UnknownType | Rejected::BadShape) => drop_session(id),
-    }
-}
-
-fn with_session(id: u64, f: impl FnOnce(&mut Session)) {
-    SESSIONS.with_borrow_mut(|s| {
-        if let Some(session) = s.get_mut(&id) {
-            f(session);
-        }
-    });
-}
-
-fn start_task(id: u64, text: String, window: u64) {
-    let mut job = None;
-    with_session(id, |s| {
-        if s.task.is_some() {
-            return s.post(&Event::Error("Дождитесь ответа или нажмите «Стоп».".into()));
-        }
-        if !api::history_fits(&s.history, text.chars().count(), 2) {
-            return s.post(&Event::Error(
-                "Диалог слишком длинный. Нажмите «Новый чат».".into(),
-            ));
-        }
-        let Some(shared) = Shared::new() else {
-            return s.post(&Event::Error(api::ApiError::Internal.describe()));
-        };
-        let mut history = std::mem::take(&mut s.history);
-        agent::push_user_text(&mut history, text);
-        s.task = Some(shared.clone());
-        s.post(&Event::Busy(true));
-        job = Some((history, shared));
-    });
-    if let Some((history, shared)) = job {
-        spawn_local(agent::run(id, window, history, shared));
-    }
-}
-
-/// Задача закончилась: диалог возвращается в сессию.
-pub(crate) fn finish_task(id: u64, request: u64, history: Vec<Turn>) {
-    with_session(id, |s| {
-        // Если за время задачи нажали «Новый чат», старый диалог не нужен,
-        // а слот задачи может принадлежать уже новой.
-        if s.task.take_if(|t| t.request == request).is_some() {
-            s.history = history;
-            s.post(&Event::Busy(false));
-        }
-    });
-}
-
-fn reset(id: u64) {
-    with_session(id, |s| {
-        if let Some(task) = s.task.take() {
-            task.halt(Cause::Stopped);
-        }
-        s.history.clear();
-        s.post(&Event::Busy(false));
-        s.post(&Event::Notice("Новый чат.".into()));
-    });
 }

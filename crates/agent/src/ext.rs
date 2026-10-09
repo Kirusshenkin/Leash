@@ -12,6 +12,10 @@ extern "C" {
     #[wasm_bindgen(js_namespace = ["browser", "runtime"], js_name = connect)]
     pub fn runtime_connect(info: &Object) -> Port;
 
+    /// Порт к мосту (native messaging). Firefox запускает процесс моста.
+    #[wasm_bindgen(catch, js_namespace = ["browser", "runtime"], js_name = connectNative)]
+    pub fn runtime_connect_native(app: &str) -> Result<Port, JsValue>;
+
     #[wasm_bindgen(js_namespace = ["browser", "runtime"], js_name = openOptionsPage)]
     pub fn runtime_open_options_page() -> Promise;
 
@@ -23,16 +27,6 @@ extern "C" {
 
     #[wasm_bindgen(js_namespace = ["browser", "storage", "local"], js_name = remove)]
     pub fn storage_local_remove(keys: &JsValue) -> Promise;
-
-    // storage.session по умолчанию недоступна content-скриптам: здесь ключ API.
-    #[wasm_bindgen(catch, js_namespace = ["browser", "storage", "session"], js_name = get)]
-    pub fn storage_session_get(keys: &JsValue) -> Result<Promise, JsValue>;
-
-    #[wasm_bindgen(catch, js_namespace = ["browser", "storage", "session"], js_name = set)]
-    pub fn storage_session_set(items: &Object) -> Result<Promise, JsValue>;
-
-    #[wasm_bindgen(catch, js_namespace = ["browser", "storage", "session"], js_name = remove)]
-    pub fn storage_session_remove(keys: &JsValue) -> Result<Promise, JsValue>;
 
     #[wasm_bindgen(catch, js_namespace = ["browser", "tabs"], js_name = query)]
     pub fn tabs_query(info: &Object) -> Result<Promise, JsValue>;
@@ -46,8 +40,11 @@ extern "C" {
     #[wasm_bindgen(catch, js_namespace = ["browser", "tabs"], js_name = goBack)]
     pub fn tabs_go_back(tab: f64) -> Result<Promise, JsValue>;
 
-    #[wasm_bindgen(catch, js_namespace = ["browser", "windows"], js_name = getCurrent)]
-    pub fn windows_get_current() -> Result<Promise, JsValue>;
+    #[wasm_bindgen(catch, js_namespace = ["browser", "windows"], js_name = create)]
+    pub fn windows_create(props: &Object) -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(catch, js_namespace = ["browser", "windows"], js_name = remove)]
+    pub fn windows_remove(window: f64) -> Result<Promise, JsValue>;
 
     #[wasm_bindgen(catch, js_namespace = ["browser", "permissions"], js_name = getAll)]
     pub fn permissions_get_all() -> Result<Promise, JsValue>;

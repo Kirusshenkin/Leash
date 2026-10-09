@@ -1,14 +1,15 @@
-//! Leash: ядро расширения. Одна сборка WASM, три точки входа:
-//! background (агент, политика, API), sidebar и options (интерфейс).
+//! Leash: ядро расширения. Одна сборка WASM, четыре точки входа:
+//! background (мост к Claude, политика, действия), sidebar (журнал и
+//! «Стоп»), окно подтверждения и options.
 //!
-//! Чистая логика (протокол, настройки, разбор ответа API) не зависит от
+//! Чистая логика (протокол, политика, снимок, guard, проба) не зависит от
 //! браузера и тестируется нативно через `cargo test`.
 
 #![forbid(unsafe_code)]
 
-mod agent;
-mod api;
 mod background;
+mod bridge;
+mod confirm;
 mod dom;
 mod ext;
 mod guard;
@@ -19,10 +20,10 @@ mod probe;
 mod protocol;
 mod settings;
 mod sidebar;
-mod stream;
 mod text;
-use leash_core::tools;
 mod value;
+
+use leash_core::tools;
 
 #[cfg(test)]
 mod manifest_tests;

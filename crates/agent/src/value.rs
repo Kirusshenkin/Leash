@@ -5,7 +5,7 @@ use js_sys::{Array, Object, Reflect};
 use leash_core::json::{MAX_DEPTH, MAX_NODES, MAX_STRING_BYTES};
 use wasm_bindgen::JsValue;
 
-pub(crate) use leash_core::json::{Value, parse_json};
+pub(crate) use leash_core::json::Value;
 
 struct Budget {
     nodes: usize,

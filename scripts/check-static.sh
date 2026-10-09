@@ -11,8 +11,8 @@ deny() {
 	fi
 }
 
-OURS="crates extension/background extension/sidebar extension/options extension/content extension/manifest.json"
-HTML="extension/sidebar extension/options"
+OURS="crates/agent crates/core extension/background extension/sidebar extension/options extension/confirm extension/content extension/manifest.json"
+HTML="extension/sidebar extension/options extension/confirm"
 
 deny "вставка HTML в DOM" \
 	'inner_html|outer_html|insert_adjacent_html|innerHTML|outerHTML|insertAdjacentHTML|document\.write|DOMParser|DomParser|createContextualFragment' $OURS
@@ -20,7 +20,7 @@ deny "исполнение строк как кода" \
 	'(^|[^A-Za-z_])eval[ (]|new Function|new_with_args|new_no_args|set_(timeout|interval)_with_str|js_name[[:space:]]*=[[:space:]]*"?(eval|Function)' $OURS
 deny "исполнение строк как кода в клее" '(^|[^A-Za-z_])eval[ (]|new Function|Function\(' extension/pkg
 deny "unsafe в Rust" 'unsafe[[:space:]]*(\{|fn|impl|trait|extern)' crates
-JS="extension/background extension/sidebar extension/options extension/content"
+JS="extension/background extension/sidebar extension/options extension/confirm extension/content"
 # В JS-мосте запрещено само слово: ловит и console.log, и `const {log} = console`.
 deny "логи в консоль (утечка данных)" '(^|[^A-Za-z0-9_$])console([^A-Za-z0-9_$]|$)' $JS
 # В Rust к консоли можно прийти только через привязку: web-sys или своя extern.
@@ -48,14 +48,13 @@ if grep -rn '<script' $HTML | grep -vE '<script type="module" src="[a-z]+\.js"><
 	echo "ЗАПРЕЩЕНО (inline-скрипт или нестандартный <script>)"; fail=1
 fi
 
-# Клей wasm-bindgen: допускаются ровно два известных вызова fetch
-# (наш запрос к API и загрузка своего .wasm). Любой другой — отказ.
+# Клей wasm-bindgen: допускается ровно один fetch — загрузка своего .wasm.
+# Сети у расширения нет: страницы уходят только в мост.
 unknown_fetch=$(grep -nE 'fetch\(' extension/pkg/leash.js \
-	| grep -vE 'const ret = arg0\.fetch\(getStringFromWasm0\(arg1, arg2\), arg3\);$' \
 	| grep -vE 'module_or_path = fetch\(module_or_path\);$')
 if [ -n "$unknown_fetch" ]; then echo "неизвестный fetch в клее:"; echo "$unknown_fetch"; fail=1; fi
 fetches=$(grep -oE 'fetch\(' extension/pkg/leash.js | wc -l | tr -d ' ')
-if [ "$fetches" -ne 2 ]; then echo "в клее $fetches вызовов fetch, ожидается 2"; fail=1; fi
+if [ "$fetches" -ne 1 ]; then echo "в клее $fetches вызовов fetch, ожидается 1"; fail=1; fi
 deny "иные сетевые API в клее" 'XMLHttpRequest|WebSocket|sendBeacon|EventSource|importScripts|import\(' extension/pkg
 # В клее допустим только console.warn о загрузке wasm и устаревших параметрах.
 deny "логи в клее" 'console\.(log|info|debug|error|trace|dir|table)' extension/pkg
@@ -63,7 +62,7 @@ warns=$(grep -oE 'console\.warn' extension/pkg/leash.js | wc -l | tr -d ' ')
 if [ "$warns" -gt 3 ]; then echo "в клее $warns console.warn, ожидается не больше 3"; fail=1; fi
 
 # Бюджет JS-моста: суммарно не больше 200 строк.
-js_lines=$(cat extension/background/*.js extension/sidebar/*.js extension/options/*.js extension/content/*.js | wc -l | tr -d ' ')
+js_lines=$(cat extension/background/*.js extension/sidebar/*.js extension/options/*.js extension/confirm/*.js extension/content/*.js | wc -l | tr -d ' ')
 if [ "$js_lines" -gt 200 ]; then echo "JS-мост $js_lines строк, лимит 200"; fail=1; fi
 
 [ "$fail" -eq 0 ] && echo "check-static: ok (JS-мост: $js_lines строк)"
