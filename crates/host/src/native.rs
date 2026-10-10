@@ -600,8 +600,8 @@ mod tests {
     }
 
     #[cfg(test)]
-    #[test]
     #[cfg(unix)]
+    #[test]
     fn calls_reach_extension_and_come_back() {
         let home = TempHome::new("nv");
         let sock = home.0.join("s.sock");
@@ -647,8 +647,8 @@ mod tests {
     }
 
     #[cfg(test)]
-    #[test]
     #[cfg(unix)]
+    #[test]
     fn client_gone_mid_call_ends_session_at_once() {
         let home = TempHome::new("gn");
         let sock = home.0.join("s.sock");
@@ -703,8 +703,8 @@ mod tests {
     }
 
     #[cfg(test)]
-    #[test]
     #[cfg(unix)]
+    #[test]
     fn host_exits_when_firefox_closes() {
         let home = TempHome::new("cl");
         let listener = UnixListener::bind(home.0.join("s.sock")).unwrap();
