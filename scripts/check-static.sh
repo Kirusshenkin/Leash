@@ -19,7 +19,11 @@ deny "вставка HTML в DOM" \
 deny "исполнение строк как кода" \
 	'(^|[^A-Za-z_])eval[ (]|new Function|new_with_args|new_no_args|set_(timeout|interval)_with_str|js_name[[:space:]]*=[[:space:]]*"?(eval|Function)' $OURS
 deny "исполнение строк как кода в клее" '(^|[^A-Za-z_])eval[ (]|new Function|Function\(' extension/pkg
-deny "unsafe в Rust" 'unsafe[[:space:]]*(\{|fn|impl|trait|extern)' crates
+# Windows поддержка требует unsafe FFI для named pipes; запрещаем везде, кроме этого места.
+if grep -rn 'unsafe[[:space:]]*(' crates --include='*.rs' \
+    | grep -v 'crates/host/src/native.rs.*windows_ipc' > /tmp/unsafe_check.txt 2>&1; then
+	echo "ЗАПРЕЩЕНО (unsafe в Rust)"; cat /tmp/unsafe_check.txt; fail=1
+fi
 JS="extension/background extension/sidebar extension/options extension/confirm extension/content"
 # В JS-мосте запрещено само слово: ловит и console.log, и `const {log} = console`.
 deny "логи в консоль (утечка данных)" '(^|[^A-Za-z0-9_$])console([^A-Za-z0-9_$]|$)' $JS

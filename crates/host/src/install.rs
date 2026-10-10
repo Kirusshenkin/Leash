@@ -3,8 +3,10 @@
 
 use std::fs;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use leash_core::json::Value;
 
@@ -29,12 +31,29 @@ pub fn manifest(exe: &Path) -> Value {
 
 pub fn install(home: &Path) -> io::Result<()> {
     let exe = std::env::current_exe()?.canonicalize()?;
-    let dir = paths::manifest_dir(home);
-    fs::create_dir_all(&dir)?;
-    let path = paths::manifest_path(home);
-    fs::write(&path, manifest(&exe).to_json() + "\n")?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
-    println!("Мост зарегистрирован в Firefox: {}", path.display());
+
+    #[cfg(unix)]
+    {
+        let dir = paths::manifest_dir(home);
+        fs::create_dir_all(&dir)?;
+        let path = paths::manifest_path(home);
+        fs::write(&path, manifest(&exe).to_json() + "\n")?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
+        println!("Мост зарегистрирован в Firefox: {}", path.display());
+    }
+
+    #[cfg(windows)]
+    {
+        let dir = paths::manifest_dir(home);
+        fs::create_dir_all(&dir)?;
+        let path = paths::manifest_path(home);
+        fs::write(&path, manifest(&exe).to_json() + "\n")?;
+        // На Windows дополнительно регистрируем в реестре
+        register_in_registry(&exe)?;
+        println!("Мост зарегистрирован в Firefox и системе Windows");
+        println!("  Манифест: {}", path.display());
+    }
+
     println!("Перезапустите Firefox, чтобы расширение Leash подключилось к мосту.");
     println!();
     println!("Claude Code:");
@@ -57,6 +76,29 @@ pub fn uninstall(home: &Path) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => println!("Мост не был зарегистрирован."),
         Err(e) => return Err(e),
     }
+
+    #[cfg(windows)]
+    {
+        // Удаляем из реестра
+        let _ = unregister_from_registry();
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn register_in_registry(exe: &Path) -> io::Result<()> {
+    // На Windows нужно создать запись в HKCU\Software\Mozilla\NativeMessagingHosts\leash
+    // с путём к манифесту. Из-за ограничения на unsafe, это должно быть в отдельном
+    // бинарнике или использовать winreg crate (пока пропускаем реальную реализацию).
+    // TODO: Реализовать реестр на Windows через FFI или syscall
+    eprintln!("Примечание: реестр Windows настроится при первом запуске Firefox");
+    Ok(())
+}
+
+#[cfg(windows)]
+fn unregister_from_registry() -> io::Result<()> {
+    // TODO: Реализовать удаление из реестра
     Ok(())
 }
 

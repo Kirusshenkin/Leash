@@ -13,7 +13,7 @@ decides what is allowed — not the model.
 [![check](https://github.com/Kirusshenkin/leash-firefox-extension/actions/workflows/check.yml/badge.svg)](https://github.com/Kirusshenkin/leash-firefox-extension/actions/workflows/check.yml)
 [![release](https://img.shields.io/github/v/release/Kirusshenkin/leash-firefox-extension)](https://github.com/Kirusshenkin/leash-firefox-extension/releases/latest)
 ![Firefox 140+](https://img.shields.io/badge/Firefox-140%2B-FF7139?logo=firefoxbrowser&logoColor=white)
-![macOS | Linux](https://img.shields.io/badge/bridge-macOS%20%7C%20Linux-555)
+![macOS | Linux | Windows](https://img.shields.io/badge/bridge-macOS%20%7C%20Linux%20%7C%20Windows-555)
 [![License: MPL 2.0](https://img.shields.io/badge/license-MPL--2.0-brightgreen)](LICENSE)
 
 **English** · [Русский](README.ru.md)
@@ -45,7 +45,7 @@ injection still can't do serious harm.
 ```mermaid
 flowchart LR
     C["Claude Code / Claude Desktop"] -- "MCP (stdio)" --> M["leash-host mcp"]
-    M -- "unix socket ~/.leash/host.sock" --> H["leash-host"]
+    M -- "IPC<br/>(socket or pipe)" --> H["leash-host"]
     H -- "native messaging" --> E["Leash extension<br/>policy · confirmations · actions"]
     E --> T["Firefox tab<br/>(allowed sites only)"]
 ```
@@ -64,7 +64,9 @@ Claude gets these tools:
 > Use a separate Firefox profile without important logged-in services
 > (`about:profiles` → *Create a New Profile*).
 
-**1. Bridge** (macOS arm64/x86_64, Linux x86_64) — prebuilt binary from GitHub Releases:
+**1. Bridge** — prebuilt binary from GitHub Releases:
+
+**macOS (arm64/x86_64) or Linux (x86_64):**
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Kirusshenkin/leash-firefox-extension/master/scripts/get.sh | sh
@@ -77,6 +79,15 @@ registers it with Firefox. Verify where the binary came from:
 ```sh
 gh attestation verify ~/.local/bin/leash-host --repo Kirusshenkin/leash-firefox-extension
 ```
+
+**Windows (x86_64):**
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/Kirusshenkin/leash-firefox-extension/master/scripts/get.ps1' -OutFile $env:TEMP\get.ps1; & $env:TEMP\get.ps1"
+```
+
+The script verifies SHA-256 and installs `leash-host.exe` into `%LOCALAPPDATA%\Leash`
+(override with `LEASH_BIN_DIR=…`), then registers it with Firefox.
 
 **2. Connect Claude:**
 

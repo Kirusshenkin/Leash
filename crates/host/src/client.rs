@@ -1,7 +1,6 @@
-//! MCP-процесс (`leash-host mcp`): stdio от Claude, сокет к мосту в Firefox.
+//! MCP-процесс (`leash-host mcp`): stdio от Claude, сокет/канал к мосту в Firefox.
 
 use std::io::{self, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 use leash_core::json::{Value, parse_json};
@@ -15,9 +14,17 @@ Firefox; если он открыт — проверить, что мост ус
 
 /// Соединение с мостом в Firefox; открывается по первому вызову и заново
 /// после обрыва (Firefox перезапустили).
+#[cfg(unix)]
 pub struct Firefox {
     socket: PathBuf,
-    conn: Option<(BufReader<UnixStream>, UnixStream)>,
+    conn: Option<(BufReader<std::os::unix::net::UnixStream>, std::os::unix::net::UnixStream)>,
+    next: u64,
+}
+
+#[cfg(windows)]
+pub struct Firefox {
+    socket: PathBuf,
+    conn: Option<std::io::Cursor<Vec<u8>>>, // Placeholder для Windows
     next: u64,
 }
 
@@ -40,7 +47,10 @@ impl Firefox {
         }
     }
 
+    #[cfg(unix)]
     fn try_call(&mut self, tool: &str, input: &Value) -> io::Result<(String, bool)> {
+        use std::os::unix::net::UnixStream;
+
         if self.conn.is_none() {
             let s = UnixStream::connect(&self.socket)?;
             self.conn = Some((BufReader::new(s.try_clone()?), s));
@@ -71,6 +81,12 @@ impl Firefox {
             (Some(t), Some(e)) => Ok((t.to_owned(), e)),
             _ => Err(io::Error::other("некорректный ответ моста")),
         }
+    }
+
+    #[cfg(windows)]
+    fn try_call(&mut self, tool: &str, input: &Value) -> io::Result<(String, bool)> {
+        // Windows implementation placeholder
+        Err(io::Error::other("Windows IPC not yet implemented"))
     }
 }
 

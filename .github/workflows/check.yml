@@ -45,6 +45,19 @@ jobs:
           cargo install --locked cargo-audit --version =0.22.2
       - run: make check
 
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Тулчейн Rust
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Сборка и тесты leash-host
+        run: cargo test -p leash-host -p leash-core --locked --offline
+      - name: Clippy
+        run: cargo clippy -p leash-host --locked --offline -D warnings
+
   e2e:
     runs-on: ubuntu-24.04
     needs: check

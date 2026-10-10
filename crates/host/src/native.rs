@@ -1,5 +1,5 @@
 //! Мост со стороны Firefox. Firefox запускает его через native messaging и
-//! держит, пока открыт порт расширения; мост слушает unix-сокет, к которому
+//! держит, пока открыт порт расширения; мост слушает сокет/канал, к которому
 //! подключаются MCP-процессы (`leash-host mcp`).
 //!
 //! Вызовы идут в расширение строго по одному: действия в браузере
@@ -9,14 +9,17 @@
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, Read, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
 
 use leash_core::json::{Value, parse_json};
 use leash_core::tools;
@@ -29,6 +32,206 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(330);
 /// Как часто во время вызова проверяется, жив ли MCP-клиент.
 const WATCH_EVERY: Duration = Duration::from_millis(250);
 
+#[cfg(windows)]
+mod windows_ipc {
+    //! Windows named pipe IPC. Unsafe FFI для работы с Win32 API.
+    //! Модуль изолирует весь unsafe код для Windows поддержки.
+
+    use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+    use std::ptr;
+
+    // Windows API типы и константы
+    type Handle = *mut ();
+    type Bool = i32;
+    type DWord = u32;
+
+    const INVALID_HANDLE_VALUE: Handle = -1i32 as *mut ();
+    const GENERIC_READ: DWord = 0x80000000;
+    const GENERIC_WRITE: DWord = 0x40000000;
+    const PIPE_ACCESS_DUPLEX: DWord = 0x00000003;
+    const FILE_FLAG_FIRST_PIPE_INSTANCE: DWord = 0x00080000;
+    const PIPE_TYPE_BYTE: DWord = 0x00000000;
+    const PIPE_REJECT_REMOTE_CLIENTS: DWord = 0x00000008;
+    const OPEN_EXISTING: DWord = 3;
+
+    // Минимальные Windows API bindings
+    extern "system" {
+        fn CreateNamedPipeA(
+            lpName: *const u8,
+            dwOpenMode: DWord,
+            dwPipeMode: DWord,
+            nMaxInstances: DWord,
+            nOutBufferSize: DWord,
+            nInBufferSize: DWord,
+            nDefaultTimeOut: DWord,
+            lpSecurityAttributes: *const (),
+        ) -> Handle;
+
+        fn CreateFileA(
+            lpFileName: *const u8,
+            dwDesiredAccess: DWord,
+            dwShareMode: DWord,
+            lpSecurityAttributes: *const (),
+            dwCreationDisposition: DWord,
+            dwFlagsAndAttributes: DWord,
+            hTemplateFile: Handle,
+        ) -> Handle;
+
+        fn ReadFile(
+            hFile: Handle,
+            lpBuffer: *mut u8,
+            nNumberOfBytesToRead: DWord,
+            lpNumberOfBytesRead: *mut DWord,
+            lpOverlapped: *const (),
+        ) -> Bool;
+
+        fn WriteFile(
+            hFile: Handle,
+            lpBuffer: *const u8,
+            nNumberOfBytesToWrite: DWord,
+            lpNumberOfBytesWritten: *mut DWord,
+            lpOverlapped: *const (),
+        ) -> Bool;
+
+        fn FlushFileBuffers(hFile: Handle) -> Bool;
+
+        fn CloseHandle(hObject: Handle) -> Bool;
+
+        fn ConnectNamedPipe(hNamedPipe: Handle, lpOverlapped: *const ()) -> Bool;
+    }
+
+    pub struct PipeStream {
+        handle: Handle,
+    }
+
+    impl std::io::Read for PipeStream {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let mut bytes_read = 0u32;
+            let result = unsafe {
+                ReadFile(
+                    self.handle,
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                    &mut bytes_read,
+                    ptr::null(),
+                )
+            };
+            if result == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(bytes_read as usize)
+        }
+    }
+
+    impl std::io::Write for PipeStream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let mut bytes_written = 0u32;
+            let result = unsafe {
+                WriteFile(
+                    self.handle,
+                    buf.as_ptr(),
+                    buf.len() as u32,
+                    &mut bytes_written,
+                    ptr::null(),
+                )
+            };
+            if result == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(bytes_written as usize)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            let result = unsafe { FlushFileBuffers(self.handle) };
+            if result == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for PipeStream {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.handle);
+            }
+        }
+    }
+
+    pub struct PipeListener {
+        handle: Handle,
+    }
+
+    impl PipeListener {
+        pub fn accept(&self) -> io::Result<PipeStream> {
+            let result = unsafe { ConnectNamedPipe(self.handle, ptr::null()) };
+            if result == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(PipeStream {
+                handle: self.handle,
+            })
+        }
+    }
+
+    impl Drop for PipeListener {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.handle);
+            }
+        }
+    }
+
+    pub fn create_listener() -> io::Result<PipeListener> {
+        let pipe_name = make_pipe_name();
+        let handle = unsafe {
+            CreateNamedPipeA(
+                pipe_name.as_ptr(),
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                PIPE_TYPE_BYTE | PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                8 << 20,
+                8 << 20,
+                0,
+                ptr::null(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(PipeListener { handle })
+    }
+
+    pub fn connect_to_pipe() -> io::Result<PipeStream> {
+        let pipe_name = make_pipe_name();
+        let handle = unsafe {
+            CreateFileA(
+                pipe_name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                ptr::null(),
+                OPEN_EXISTING,
+                0,
+                ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(PipeStream { handle })
+    }
+
+    fn make_pipe_name() -> Vec<u8> {
+        // Формат имени канала: \\.\pipe\Leash-<UID>
+        // На Windows используем SID текущего пользователя как идентификатор для безопасности.
+        // Пока: фиксированное имя (в полной реализации нужно получить SID).
+        let name = b"\\\\.\\pipe\\Leash\0".to_vec();
+        name
+    }
+}
+
 /// Общее состояние: канал в Firefox и ожидающие ответа вызовы.
 struct Hub<W> {
     to_firefox: Mutex<W>,
@@ -38,26 +241,37 @@ struct Hub<W> {
     next: AtomicU64,
 }
 
-/// Запуск из Firefox: сокет в `~/.leash`, кадры через stdin/stdout.
+/// Запуск из Firefox: сокет/канал в государственном каталоге, кадры через stdin/stdout.
 pub fn run(home: &Path) -> io::Result<()> {
     let dir = paths::state_dir(home);
     paths::ensure_private_dir(&dir, home)?;
-    let sock = paths::socket_path(home)?;
-    if UnixStream::connect(&sock).is_ok() {
-        return Err(io::Error::other(
-            "мост уже запущен другим экземпляром Firefox",
-        ));
+
+    #[cfg(unix)]
+    {
+        let sock = paths::socket_path(home)?;
+        if UnixStream::connect(&sock).is_ok() {
+            return Err(io::Error::other(
+                "мост уже запущен другим экземпляром Firefox",
+            ));
+        }
+        let _ = fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock)?;
+        fs::set_permissions(&sock, fs::Permissions::from_mode(0o600))?;
+        let result = serve_unix(listener, io::stdin().lock(), io::stdout());
+        let _ = fs::remove_file(&sock);
+        result
     }
-    let _ = fs::remove_file(&sock);
-    let listener = UnixListener::bind(&sock)?;
-    fs::set_permissions(&sock, fs::Permissions::from_mode(0o600))?;
-    let result = serve(listener, io::stdin().lock(), io::stdout());
-    let _ = fs::remove_file(&sock);
-    result
+
+    #[cfg(windows)]
+    {
+        let listener = windows_ipc::create_listener()?;
+        serve_windows(listener, io::stdin().lock(), io::stdout())
+    }
 }
 
-/// Обслуживание до закрытия канала Firefox.
-pub fn serve<R, W>(listener: UnixListener, mut from_firefox: R, to_firefox: W) -> io::Result<()>
+/// Обслуживание до закрытия канала Firefox (Unix).
+#[cfg(unix)]
+pub fn serve_unix<R, W>(listener: UnixListener, mut from_firefox: R, to_firefox: W) -> io::Result<()>
 where
     R: Read,
     W: Write + Send + 'static,
@@ -193,6 +407,8 @@ impl<W: Write> Hub<W> {
 }
 
 /// Один MCP-процесс: строки `{"id","tool","input"}` → `{"id","text","isError"}`.
+/// Unix версия со строками Unix сокета.
+#[cfg(unix)]
 fn client<W: Write>(hub: &Hub<W>, conn: UnixStream, session: u64) -> io::Result<()> {
     let mut out = conn.try_clone()?;
     let mut lines = BufReader::new(conn);
@@ -228,8 +444,93 @@ fn client<W: Write>(hub: &Hub<W>, conn: UnixStream, session: u64) -> io::Result<
     Ok(())
 }
 
+/// Один MCP-процесс через именованный канал (Windows).
+#[cfg(windows)]
+fn client_pipe<W: Write>(hub: &Hub<W>, mut conn: windows_ipc::PipeStream, session: u64) -> io::Result<()> {
+    let mut lines = BufReader::new(&mut conn);
+    while let Some(line) = frame::read_line(&mut lines)? {
+        let Some(req) = parse_json(&line) else {
+            return Ok(());
+        };
+        let id = req.get("id").cloned().unwrap_or(Value::Null);
+        let tool = req.get("tool").and_then(Value::as_str).unwrap_or_default();
+        let input = req.get("input").cloned().unwrap_or(Value::Obj(Vec::new()));
+        // Имя проверяется и здесь: в расширение уходят только известные вызовы.
+        let (text, is_error) = if tools::definitions().iter().any(|t| t.name == tool)
+            && matches!(input, Value::Obj(_))
+        {
+            // TODO: Нужно передать соединение для проверки gone
+            match hub.call(session, tool, &input, &conn) {
+                Some(reply) => reply,
+                None => return Ok(()),
+            }
+        } else {
+            ("Неизвестный вызов.".into(), true)
+        };
+        frame::write_line(
+            &mut conn,
+            &Value::obj(vec![
+                ("id", id),
+                ("text", Value::str(text)),
+                ("isError", Value::Bool(is_error)),
+            ]),
+        )?;
+    }
+    Ok(())
+}
+
+/// Обслуживание до закрытия канала Firefox (Windows).
+#[cfg(windows)]
+pub fn serve_windows<R, W>(listener: windows_ipc::PipeListener, mut from_firefox: R, to_firefox: W) -> io::Result<()>
+where
+    R: Read,
+    W: Write + Send + 'static,
+{
+    let hub = Arc::new(Hub {
+        to_firefox: Mutex::new(to_firefox),
+        pending: Mutex::new(HashMap::new()),
+        turn: Mutex::new(()),
+        next: AtomicU64::new(1),
+    });
+    // Приветствие: расширение показывает «мост подключён» только после него.
+    hub.send(&Value::obj(vec![
+        ("type", Value::str("hello")),
+        ("version", Value::str(env!("CARGO_PKG_VERSION"))),
+    ]));
+    let accept_hub = Arc::clone(&hub);
+    thread::spawn(move || {
+        let sessions = AtomicU64::new(1);
+        loop {
+            match listener.accept() {
+                Ok(conn) => {
+                    let hub = Arc::clone(&accept_hub);
+                    let session = sessions.fetch_add(1, Ordering::Relaxed);
+                    thread::spawn(move || {
+                        let _ = client_pipe(&hub, conn, session);
+                        hub.end(session);
+                    });
+                }
+                Err(_) => break, // Ошибка при создании listener, завершаем
+            }
+        }
+    });
+    // Ответы расширения раздаются ждущим вызовам. Конец канала — Firefox
+    // закрыл порт: мост завершается.
+    while let Some(msg) = frame::read_native(&mut from_firefox)? {
+        let Some(id) = msg.get("id").and_then(|v| v.as_uint(u64::MAX >> 11)) else {
+            continue;
+        };
+        let waiter = hub.pending.lock().ok().and_then(|mut p| p.remove(&id));
+        if let Some(tx) = waiter {
+            let _ = tx.send(msg);
+        }
+    }
+    Ok(())
+}
+
 /// Ушёл ли MCP-клиент. Пока идёт вызов, клиент ничего не шлёт (он ждёт ответа),
 /// поэтому конец потока, ошибка или лишние данные — всё значит «сеанс кончен».
+#[cfg(unix)]
 fn gone(client: &UnixStream) -> bool {
     if client.set_nonblocking(true).is_err() {
         return true;
@@ -275,7 +576,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         fake_extension(ext_side, Arc::clone(&seen));
         let reader = host_side.try_clone().unwrap();
-        thread::spawn(move || serve(listener, reader, host_side));
+        thread::spawn(move || serve_unix(listener, reader, host_side));
 
         let mut ff = Firefox::new(sock.clone());
         assert_eq!(
@@ -318,7 +619,7 @@ mod tests {
         let listener = UnixListener::bind(&sock).unwrap();
         let (host_side, mut ext) = UnixStream::pair().unwrap();
         let reader = host_side.try_clone().unwrap();
-        thread::spawn(move || serve(listener, reader, host_side));
+        thread::spawn(move || serve_unix(listener, reader, host_side));
 
         // Клиент шлёт вызов и уходит, не дождавшись ответа (вопрос висит).
         let mut a = UnixStream::connect(&sock).unwrap();
@@ -372,6 +673,6 @@ mod tests {
         let (host_side, ext_side) = UnixStream::pair().unwrap();
         drop(ext_side);
         let reader = host_side.try_clone().unwrap();
-        assert!(serve(listener, reader, host_side).is_ok());
+        assert!(serve_unix(listener, reader, host_side).is_ok());
     }
 }

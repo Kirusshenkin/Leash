@@ -1,44 +1,77 @@
-//! Где лежат сокет моста и манифест native messaging.
+//! Где лежат сокет/канал моста и манифест native messaging.
 //!
-//! Сокет — в `~/.leash` с правами 0700: подключиться к мосту может только
-//! этот пользователь. Каталог проверяется при каждом запуске: чужой владелец,
-//! лишние права или симлинк — отказ.
+//! Unix (macOS, Linux): сокет в `~/.leash/host.sock` с правами 0700.
+//! Каталог проверяется при каждом запуске: чужой владелец, лишние права
+//! или симлинк — отказ.
+//!
+//! Windows: именованный канал `\\.\pipe\Leash-<UID>`, безопасность
+//! настраивается через дескриптор при создании.
 
 use std::fs;
 use std::io;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-/// Предел пути unix-сокета (`sun_path`) на macOS; на Linux он больше.
-const MAX_SOCKET_PATH: usize = 103;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 pub fn home() -> io::Result<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|h| h.is_absolute())
-        .ok_or_else(|| io::Error::other("HOME не задан или не абсолютный"))?;
-    Ok(home)
+    #[cfg(unix)]
+    {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|h| h.is_absolute())
+            .ok_or_else(|| io::Error::other("HOME не задан или не абсолютный"))?;
+        Ok(home)
+    }
+    #[cfg(windows)]
+    {
+        let home = std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .filter(|h| h.is_absolute())
+            .ok_or_else(|| io::Error::other("USERPROFILE не задан или не абсолютный"))?;
+        Ok(home)
+    }
 }
 
 pub fn state_dir(home: &Path) -> PathBuf {
-    home.join(".leash")
+    #[cfg(unix)]
+    {
+        home.join(".leash")
+    }
+    #[cfg(windows)]
+    {
+        home.join("AppData/Local/Leash")
+    }
 }
 
 pub fn socket_path(home: &Path) -> io::Result<PathBuf> {
-    let path = state_dir(home).join("host.sock");
-    if path.as_os_str().len() > MAX_SOCKET_PATH {
-        return Err(io::Error::other(format!(
-            "путь сокета длиннее {MAX_SOCKET_PATH} байт: {}",
-            path.display()
-        )));
+    #[cfg(unix)]
+    {
+        /// Предел пути unix-сокета (`sun_path`) на macOS; на Linux он больше.
+        const MAX_SOCKET_PATH: usize = 103;
+        let path = state_dir(home).join("host.sock");
+        if path.as_os_str().len() > MAX_SOCKET_PATH {
+            return Err(io::Error::other(format!(
+                "путь сокета длиннее {MAX_SOCKET_PATH} байт: {}",
+                path.display()
+            )));
+        }
+        Ok(path)
     }
-    Ok(path)
+    #[cfg(windows)]
+    {
+        // На Windows вычисляемый путь не используется (используется имя канала).
+        // Возвращаем пустой путь как плейсхолдер.
+        Ok(PathBuf::new())
+    }
 }
 
 /// Каталог манифестов native messaging Firefox для этого пользователя.
 pub fn manifest_dir(home: &Path) -> PathBuf {
     if cfg!(target_os = "macos") {
         home.join("Library/Application Support/Mozilla/NativeMessagingHosts")
+    } else if cfg!(target_os = "windows") {
+        home.join("AppData/Roaming/Mozilla/NativeMessagingHosts")
     } else {
         home.join(".mozilla/native-messaging-hosts")
     }
@@ -48,6 +81,7 @@ pub fn manifest_path(home: &Path) -> PathBuf {
     manifest_dir(home).join(format!("{}.json", leash_core::NATIVE_APP))
 }
 
+#[cfg(unix)]
 /// Создаёт каталог 0700 и проверяет, что он наш и закрыт для других.
 pub fn ensure_private_dir(dir: &Path, home: &Path) -> io::Result<()> {
     if !dir.exists() {
@@ -71,6 +105,22 @@ pub fn ensure_private_dir(dir: &Path, home: &Path) -> io::Result<()> {
     if meta.mode() & 0o077 != 0 {
         return Err(io::Error::other(format!(
             "{}: доступен другим пользователям (нужно 0700)",
+            dir.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+/// На Windows проверяет существование и создание каталога.
+pub fn ensure_private_dir(dir: &Path, _home: &Path) -> io::Result<()> {
+    if !dir.exists() {
+        fs::create_dir_all(dir)?;
+    }
+    let meta = fs::symlink_metadata(dir)?;
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return Err(io::Error::other(format!(
+            "{} не каталог или симлинк",
             dir.display()
         )));
     }

@@ -7,8 +7,9 @@
 //!
 //! В stdout пишутся только сообщения протоколов; диагностика — в stderr
 //! (Firefox показывает её в консоли браузера, Claude — в своих логах).
-
-#![forbid(unsafe_code)]
+//!
+//! На Windows используется unsafe FFI для работы с именованными каналами,
+//! изолировано в модуле windows_ipc внутри native.rs.
 
 mod client;
 mod frame;

@@ -13,7 +13,7 @@ Claude Code и Claude Desktop читают страницы, нажимают, �
 [![check](https://github.com/Kirusshenkin/leash-firefox-extension/actions/workflows/check.yml/badge.svg)](https://github.com/Kirusshenkin/leash-firefox-extension/actions/workflows/check.yml)
 [![release](https://img.shields.io/github/v/release/Kirusshenkin/leash-firefox-extension)](https://github.com/Kirusshenkin/leash-firefox-extension/releases/latest)
 ![Firefox 140+](https://img.shields.io/badge/Firefox-140%2B-FF7139?logo=firefoxbrowser&logoColor=white)
-![macOS | Linux](https://img.shields.io/badge/bridge-macOS%20%7C%20Linux-555)
+![macOS | Linux | Windows](https://img.shields.io/badge/bridge-macOS%20%7C%20Linux%20%7C%20Windows-555)
 [![License: MPL 2.0](https://img.shields.io/badge/license-MPL--2.0-brightgreen)](LICENSE)
 
 [English](README.md) · **Русский**
@@ -47,7 +47,7 @@ Claude Code и Claude Desktop читают страницы, нажимают, �
 ```mermaid
 flowchart LR
     C["Claude Code / Claude Desktop"] -- "MCP (stdio)" --> M["leash-host mcp"]
-    M -- "unix-сокет ~/.leash/host.sock" --> H["leash-host"]
+    M -- "IPC<br/>(сокет или канал)" --> H["leash-host"]
     H -- "native messaging" --> E["расширение Leash<br/>политика · подтверждения · действия"]
     E --> T["вкладка Firefox<br/>(только разрешённые сайты)"]
 ```
@@ -66,7 +66,9 @@ flowchart LR
 > Лучше отдельный профиль Firefox без залогиненных важных сервисов
 > (`about:profiles` → «Создать новый профиль»).
 
-**1. Мост** (macOS arm64/x86_64, Linux x86_64) — готовая сборка из GitHub Releases:
+**1. Мост** — готовая сборка из GitHub Releases:
+
+**macOS (arm64/x86_64) или Linux (x86_64):**
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Kirusshenkin/leash-firefox-extension/master/scripts/get.sh | sh
@@ -79,6 +81,15 @@ curl -fsSL https://raw.githubusercontent.com/Kirusshenkin/leash-firefox-extensio
 ```sh
 gh attestation verify ~/.local/bin/leash-host --repo Kirusshenkin/leash-firefox-extension
 ```
+
+**Windows (x86_64):**
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/Kirusshenkin/leash-firefox-extension/master/scripts/get.ps1' -OutFile $env:TEMP\get.ps1; & $env:TEMP\get.ps1"
+```
+
+Скрипт сверяет SHA-256 и кладёт `leash-host.exe` в `%LOCALAPPDATA%\Leash`
+(другой каталог: `LEASH_BIN_DIR=…`), затем регистрирует в Firefox.
 
 **2. Подключить Claude:**
 
