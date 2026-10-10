@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Leash — настройки</title>
+  <link rel="stylesheet" href="../ui.css">
+  <script type="module" src="options.js"></script>
+</head>
+<body class="options">
+  <h1>Leash — настройки</h1>
+
+  <section>
+    <h2>Мост к Claude</h2>
+    <p class="hint">Claude Code или Claude Desktop управляют Firefox через программу leash-host.
+      Расширение само ни с кем по сети не связывается: страницы уходят только в мост, а из него —
+      в Claude, которым вы пользуетесь. Ключ API не нужен.</p>
+    <ol class="hint">
+      <li>Установите мост: <code>leash-host install</code>, затем перезапустите Firefox.</li>
+      <li>Подключите его к Claude Code: <code>claude mcp add --scope user leash -- &lt;путь к leash-host&gt; mcp</code>
+        (точную команду печатает <code>leash-host install</code>).</li>
+      <li>Разрешите ниже сайты, на которых Claude может работать.</li>
+    </ol>
+    <p class="hint">Опасные действия Claude подтверждаете вы в отдельном окне Leash. Пароли, данные
+      карт, одноразовые коды и CAPTCHA вводите сами: Claude они недоступны.</p>
+  </section>
+
+  <section>
+    <h2>Сайты</h2>
+    <p class="hint">Агент работает только на сайтах из списка разрешённых: точное совпадение
+      схемы, имени и порта, только https, без масок и поддоменов. Запрет сильнее разрешения.
+      При сохранении Firefox спросит доступ к сайтам из списка: без него сайт закрыт.</p>
+    <label for="allow">Разрешённые сайты (по одному на строку)</label>
+    <textarea id="allow" rows="6" spellcheck="false" placeholder="example.com"></textarea>
+    <label for="deny">Запрещённые сайты (закрываются вместе с поддоменами)</label>
+    <textarea id="deny" rows="4" spellcheck="false" placeholder="mybank.example"></textarea>
+    <div class="buttons">
+      <button id="save-sites" type="button">Сохранить списки</button>
+    </div>
+    <label for="probe">Проверить адрес по сохранённым спискам</label>
+    <input id="probe" type="url" autocomplete="off" spellcheck="false" placeholder="адрес страницы">
+    <p id="probe-result" class="status" aria-live="polite"></p>
+    <details>
+      <summary>Встроенный запрет (не отключается)</summary>
+      <ul id="builtin"></ul>
+    </details>
+  </section>
+
+  <p id="message" class="status" aria-live="polite"></p>
+</body>
+</html>

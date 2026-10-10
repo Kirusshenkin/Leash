@@ -1,0 +1,67 @@
+# Готовые сборки моста leash-host для scripts/get.sh: по тегу v* собирает
+# бинарники macOS (arm64, x86_64) и Linux x86_64 (musl, статический), кладёт их
+# в GitHub Release вместе с SHA256SUMS и аттестацией сборки.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { os: macos-15, target: aarch64-apple-darwin }
+          - { os: macos-15, target: x86_64-apple-darwin }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl }
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Сборка
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add ${{ matrix.target }}
+          cargo build --locked --offline --release -p leash-host --target ${{ matrix.target }}
+          mkdir dist
+          cp target/${{ matrix.target }}/release/leash-host dist/leash-host-${{ matrix.target }}
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/leash-host-${{ matrix.target }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: leash-host-${{ matrix.target }}
+          path: dist/leash-host-${{ matrix.target }}
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cd dist
+          sha256sum leash-host-* > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "Мост leash-host. Установка: scripts/get.sh, проверка: gh attestation verify <файл> --repo $GITHUB_REPOSITORY" leash-host-* SHA256SUMS

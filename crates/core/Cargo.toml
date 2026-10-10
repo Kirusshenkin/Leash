@@ -1,0 +1,9 @@
+[package]
+name = "leash-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Без зависимостей: общий код расширения (WASM) и моста (нативный).
+[dependencies]

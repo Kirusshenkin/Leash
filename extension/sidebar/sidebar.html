@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Leash</title>
+  <link rel="stylesheet" href="../ui.css">
+  <script type="module" src="sidebar.js"></script>
+</head>
+<body class="sidebar">
+  <header>
+    <span class="brand">Leash</span>
+    <button id="settings" type="button">Настройки</button>
+  </header>
+  <p id="status" class="status">Подключаюсь…</p>
+  <main id="log" aria-live="polite"></main>
+  <footer>
+    <div class="buttons">
+      <button id="stop" type="button" class="stop">Стоп</button>
+      <button id="connect" type="button">Подключить мост</button>
+      <button id="reset" type="button">Сбросить сеансы</button>
+    </div>
+  </footer>
+</body>
+</html>

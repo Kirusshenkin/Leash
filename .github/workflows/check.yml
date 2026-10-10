@@ -1,0 +1,69 @@
+# Те же проверки, что make check и make e2e локально (e2e — с настоящим мостом),
+# плюс поиск ключей API во всей истории (хук pre-commit на свежем клоне выключен).
+name: check
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  RUSTUP_BIN: /home/runner/.cargo/bin
+
+jobs:
+  secrets:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Ключи API в истории
+        run: |
+          if git log -p --all --no-color | grep -E '^\+' | grep -qE 'sk-ant-[A-Za-z0-9_-]{20,}'; then
+            echo "в истории есть строка, похожая на ключ API (sk-ant-…)"
+            exit 1
+          fi
+
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Тулчейн ставит rustup по rust-toolchain.toml. Инструменты собираются
+      # из crates.io с --locked: исходники сверяются с хешами реестра.
+      - name: Инструменты
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          BINDGEN=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/version = "\(.*\)"/\1/p')
+          cargo install --locked wasm-bindgen-cli --version "=$BINDGEN"
+          cargo install --locked cargo-deny --version =0.20.2
+          cargo install --locked cargo-audit --version =0.22.2
+      - run: make check
+
+  e2e:
+    runs-on: ubuntu-24.04
+    needs: check
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: e2e/go.mod
+          cache: false
+      - name: Инструменты
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          BINDGEN=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/version = "\(.*\)"/\1/p')
+          cargo install --locked wasm-bindgen-cli --version "=$BINDGEN"
+      - name: gofmt и vet
+        run: |
+          test -z "$(gofmt -l e2e)" || { gofmt -l e2e; exit 1; }
+          go -C e2e vet .
+      # Сценарии I требуют e2e/private и настоящей модели — в CI их нет.
+      - run: firefox --version && make e2e
