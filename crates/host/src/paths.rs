@@ -1,29 +1,46 @@
-//! Где лежат сокет моста и манифест native messaging.
+//! Где лежат канал моста и манифест native messaging.
 //!
-//! Сокет — в `~/.leash` с правами 0700: подключиться к мосту может только
-//! этот пользователь. Каталог проверяется при каждом запуске: чужой владелец,
-//! лишние права или симлинк — отказ.
+//! macOS, Linux: сокет — в `~/.leash` с правами 0700: подключиться к мосту
+//! может только этот пользователь. Каталог проверяется при каждом запуске:
+//! чужой владелец, лишние права или симлинк — отказ.
+//!
+//! Windows: всё в `%LOCALAPPDATA%\Leash` — адрес канала (порт и токен, см.
+//! `ipc`) и манифест. Права каталог наследует от профиля пользователя;
+//! Firefox находит манифест по ключу реестра (см. `install`).
 
 use std::fs;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// Предел пути unix-сокета (`sun_path`) на macOS; на Linux он больше.
+#[cfg(unix)]
 const MAX_SOCKET_PATH: usize = 103;
 
+/// Корень, от которого считаются пути: `$HOME` или `%LOCALAPPDATA%`.
 pub fn home() -> io::Result<PathBuf> {
-    let home = std::env::var_os("HOME")
+    let var = if cfg!(windows) {
+        "LOCALAPPDATA"
+    } else {
+        "HOME"
+    };
+    let home = std::env::var_os(var)
         .map(PathBuf::from)
         .filter(|h| h.is_absolute())
-        .ok_or_else(|| io::Error::other("HOME не задан или не абсолютный"))?;
+        .ok_or_else(|| io::Error::other(format!("{var} не задан или не абсолютный")))?;
     Ok(home)
 }
 
 pub fn state_dir(home: &Path) -> PathBuf {
-    home.join(".leash")
+    if cfg!(windows) {
+        home.join("Leash")
+    } else {
+        home.join(".leash")
+    }
 }
 
+#[cfg(unix)]
 pub fn socket_path(home: &Path) -> io::Result<PathBuf> {
     let path = state_dir(home).join("host.sock");
     if path.as_os_str().len() > MAX_SOCKET_PATH {
@@ -35,10 +52,18 @@ pub fn socket_path(home: &Path) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Файл с портом и токеном канала.
+#[cfg(windows)]
+pub fn socket_path(home: &Path) -> io::Result<PathBuf> {
+    Ok(state_dir(home).join("host.port"))
+}
+
 /// Каталог манифестов native messaging Firefox для этого пользователя.
 pub fn manifest_dir(home: &Path) -> PathBuf {
     if cfg!(target_os = "macos") {
         home.join("Library/Application Support/Mozilla/NativeMessagingHosts")
+    } else if cfg!(windows) {
+        state_dir(home)
     } else {
         home.join(".mozilla/native-messaging-hosts")
     }
@@ -49,6 +74,7 @@ pub fn manifest_path(home: &Path) -> PathBuf {
 }
 
 /// Создаёт каталог 0700 и проверяет, что он наш и закрыт для других.
+#[cfg(unix)]
 pub fn ensure_private_dir(dir: &Path, home: &Path) -> io::Result<()> {
     if !dir.exists() {
         fs::create_dir_all(dir)?;
@@ -77,6 +103,22 @@ pub fn ensure_private_dir(dir: &Path, home: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Создаёт каталог и проверяет, что это каталог, а не ссылка (reparse point).
+/// Права наследуются от `%LOCALAPPDATA%`: профиль закрыт для других
+/// пользователей, кроме администраторов.
+#[cfg(windows)]
+pub fn ensure_private_dir(dir: &Path, _home: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let meta = fs::symlink_metadata(dir)?;
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return Err(io::Error::other(format!(
+            "{} не каталог или ссылка",
+            dir.display()
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -90,8 +132,13 @@ pub mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos())
                 .unwrap_or_default();
-            // Короткий путь: у сокета предел длины.
-            let dir = PathBuf::from(format!("/tmp/lh-{tag}-{}-{n}", std::process::id()));
+            // Короткий путь: у unix-сокета предел длины.
+            let root = if cfg!(windows) {
+                std::env::temp_dir()
+            } else {
+                PathBuf::from("/tmp")
+            };
+            let dir = root.join(format!("lh-{tag}-{}-{n}", std::process::id()));
             fs::create_dir_all(&dir).unwrap();
             Self(dir)
         }
@@ -103,6 +150,7 @@ pub mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn private_dir_is_created_closed() {
         let home = TempHome::new("pd");
@@ -113,6 +161,7 @@ pub mod tests {
         ensure_private_dir(&dir, &home.0).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn open_or_linked_dir_is_refused() {
         let home = TempHome::new("od");
@@ -129,6 +178,7 @@ pub mod tests {
         assert!(ensure_private_dir(&link, &home.0).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn layout() {
         let home = Path::new("/home/u");
@@ -139,5 +189,29 @@ pub mod tests {
         assert!(manifest_path(home).ends_with("leash.json"));
         let long = PathBuf::from(format!("/{}", "x".repeat(120)));
         assert!(socket_path(&long).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn layout() {
+        let home = Path::new(r"C:\Users\u\AppData\Local");
+        assert_eq!(
+            socket_path(home).unwrap(),
+            PathBuf::from(r"C:\Users\u\AppData\Local\Leash\host.port")
+        );
+        assert_eq!(
+            manifest_path(home),
+            PathBuf::from(r"C:\Users\u\AppData\Local\Leash\leash.json")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_dir_is_created() {
+        let home = TempHome::new("pd");
+        let dir = state_dir(&home.0);
+        ensure_private_dir(&dir, &home.0).unwrap();
+        ensure_private_dir(&dir, &home.0).unwrap();
+        assert!(dir.is_dir());
     }
 }

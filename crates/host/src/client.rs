@@ -1,12 +1,12 @@
-//! MCP-процесс (`leash-host mcp`): stdio от Claude, сокет к мосту в Firefox.
+//! MCP-процесс (`leash-host mcp`): stdio от Claude, канал `ipc` к мосту в Firefox.
 
 use std::io::{self, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 use leash_core::json::{Value, parse_json};
 
 use crate::frame;
+use crate::ipc::{self, Stream};
 use crate::mcp;
 
 const NOT_CONNECTED: &str = "Firefox с расширением Leash не подключён. Попроси пользователя открыть \
@@ -17,7 +17,7 @@ Firefox; если он открыт — проверить, что мост ус
 /// после обрыва (Firefox перезапустили).
 pub struct Firefox {
     socket: PathBuf,
-    conn: Option<(BufReader<UnixStream>, UnixStream)>,
+    conn: Option<(BufReader<Stream>, Stream)>,
     next: u64,
 }
 
@@ -42,7 +42,7 @@ impl Firefox {
 
     fn try_call(&mut self, tool: &str, input: &Value) -> io::Result<(String, bool)> {
         if self.conn.is_none() {
-            let s = UnixStream::connect(&self.socket)?;
+            let s = ipc::connect(&self.socket)?;
             self.conn = Some((BufReader::new(s.try_clone()?), s));
         }
         let id = self.next;

@@ -9,7 +9,7 @@ publish.workspace = true
 # Мост между Claude (MCP по stdio) и расширением (native messaging).
 # Только std и leash-core: без сети, без async-рантайма.
 [dependencies]
-leash-core = { path = "../core", version = "=0.2.0" }
+leash-core = { path = "../core", version = "=0.3.0" }
 
 [[bin]]
 name = "leash-host"

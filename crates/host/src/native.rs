@@ -1,5 +1,5 @@
 //! Мост со стороны Firefox. Firefox запускает его через native messaging и
-//! держит, пока открыт порт расширения; мост слушает unix-сокет, к которому
+//! держит, пока открыт порт расширения; мост слушает канал `ipc`, к которому
 //! подключаются MCP-процессы (`leash-host mcp`).
 //!
 //! Вызовы идут в расширение строго по одному: действия в браузере
@@ -9,19 +9,18 @@
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, Read, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
-use std::{fs, thread};
 
 use leash_core::json::{Value, parse_json};
 use leash_core::tools;
 
 use crate::frame;
+use crate::ipc::{self, Listener, Stream};
 use crate::paths;
 
 /// Дольше, чем расширение ждёт подтверждения пользователя (5 минут).
@@ -38,26 +37,18 @@ struct Hub<W> {
     next: AtomicU64,
 }
 
-/// Запуск из Firefox: сокет в `~/.leash`, кадры через stdin/stdout.
+/// Запуск из Firefox: канал в каталоге состояния, кадры через stdin/stdout.
 pub fn run(home: &Path) -> io::Result<()> {
-    let dir = paths::state_dir(home);
-    paths::ensure_private_dir(&dir, home)?;
-    let sock = paths::socket_path(home)?;
-    if UnixStream::connect(&sock).is_ok() {
-        return Err(io::Error::other(
-            "мост уже запущен другим экземпляром Firefox",
-        ));
-    }
-    let _ = fs::remove_file(&sock);
-    let listener = UnixListener::bind(&sock)?;
-    fs::set_permissions(&sock, fs::Permissions::from_mode(0o600))?;
+    paths::ensure_private_dir(&paths::state_dir(home), home)?;
+    let endpoint = paths::socket_path(home)?;
+    let listener = ipc::bind(&endpoint)?;
     let result = serve(listener, io::stdin().lock(), io::stdout());
-    let _ = fs::remove_file(&sock);
+    let _ = std::fs::remove_file(&endpoint);
     result
 }
 
 /// Обслуживание до закрытия канала Firefox.
-pub fn serve<R, W>(listener: UnixListener, mut from_firefox: R, to_firefox: W) -> io::Result<()>
+pub fn serve<R, W>(listener: Listener, mut from_firefox: R, to_firefox: W) -> io::Result<()>
 where
     R: Read,
     W: Write + Send + 'static,
@@ -76,8 +67,10 @@ where
     let accept_hub = Arc::clone(&hub);
     thread::spawn(move || {
         let sessions = AtomicU64::new(1);
-        for conn in listener.incoming() {
-            let Ok(conn) = conn else { continue };
+        loop {
+            let Ok(conn) = listener.accept() else {
+                continue;
+            };
             let hub = Arc::clone(&accept_hub);
             let session = sessions.fetch_add(1, Ordering::Relaxed);
             thread::spawn(move || {
@@ -115,7 +108,7 @@ impl<W: Write> Hub<W> {
         &self,
         rx: &mpsc::Receiver<Value>,
         session: u64,
-        client: &UnixStream,
+        client: &Stream,
         ended: &mut bool,
     ) -> Option<Value> {
         let deadline = Instant::now() + CALL_TIMEOUT;
@@ -128,7 +121,7 @@ impl<W: Write> Hub<W> {
             if Instant::now() >= deadline {
                 return None;
             }
-            if !*ended && gone(client) {
+            if !*ended && ipc::gone(client) {
                 *ended = true;
                 self.end(session);
             }
@@ -151,7 +144,7 @@ impl<W: Write> Hub<W> {
         session: u64,
         tool: &str,
         input: &Value,
-        client: &UnixStream,
+        client: &Stream,
     ) -> Option<(String, bool)> {
         let Ok(_turn) = self.turn.lock() else {
             return Some(("Мост в неисправном состоянии.".into(), true));
@@ -193,7 +186,7 @@ impl<W: Write> Hub<W> {
 }
 
 /// Один MCP-процесс: строки `{"id","tool","input"}` → `{"id","text","isError"}`.
-fn client<W: Write>(hub: &Hub<W>, conn: UnixStream, session: u64) -> io::Result<()> {
+fn client<W: Write>(hub: &Hub<W>, conn: Stream, session: u64) -> io::Result<()> {
     let mut out = conn.try_clone()?;
     let mut lines = BufReader::new(conn);
     while let Some(line) = frame::read_line(&mut lines)? {
@@ -228,26 +221,27 @@ fn client<W: Write>(hub: &Hub<W>, conn: UnixStream, session: u64) -> io::Result<
     Ok(())
 }
 
-/// Ушёл ли MCP-клиент. Пока идёт вызов, клиент ничего не шлёт (он ждёт ответа),
-/// поэтому конец потока, ошибка или лишние данные — всё значит «сеанс кончен».
-fn gone(client: &UnixStream) -> bool {
-    if client.set_nonblocking(true).is_err() {
-        return true;
-    }
-    let mut byte = [0u8; 1];
-    let result = (&*client).read(&mut byte);
-    let restored = client.set_nonblocking(false).is_ok();
-    !restored || !matches!(result, Err(ref e) if e.kind() == io::ErrorKind::WouldBlock)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::client::Firefox;
     use crate::paths::tests::TempHome;
 
+    /// Пара соединённых потоков вместо stdin/stdout Firefox.
+    #[cfg(unix)]
+    fn pair() -> (Stream, Stream) {
+        Stream::pair().unwrap()
+    }
+
+    #[cfg(windows)]
+    fn pair() -> (Stream, Stream) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let a = Stream::connect(l.local_addr().unwrap()).unwrap();
+        (a, l.accept().unwrap().0)
+    }
+
     /// Расширение-заглушка: отвечает на вызовы и записывает всё, что получило.
-    fn fake_extension(mut ext: UnixStream, seen: Arc<Mutex<Vec<Value>>>) {
+    fn fake_extension(mut ext: Stream, seen: Arc<Mutex<Vec<Value>>>) {
         thread::spawn(move || {
             let mut reader = ext.try_clone().unwrap();
             while let Ok(Some(msg)) = frame::read_native(&mut reader) {
@@ -270,8 +264,8 @@ mod tests {
     fn calls_reach_extension_and_come_back() {
         let home = TempHome::new("nv");
         let sock = home.0.join("s.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
-        let (host_side, ext_side) = UnixStream::pair().unwrap();
+        let listener = ipc::bind(&sock).unwrap();
+        let (host_side, ext_side) = pair();
         let seen = Arc::new(Mutex::new(Vec::new()));
         fake_extension(ext_side, Arc::clone(&seen));
         let reader = host_side.try_clone().unwrap();
@@ -315,13 +309,13 @@ mod tests {
     fn client_gone_mid_call_ends_session_at_once() {
         let home = TempHome::new("gn");
         let sock = home.0.join("s.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
-        let (host_side, mut ext) = UnixStream::pair().unwrap();
+        let listener = ipc::bind(&sock).unwrap();
+        let (host_side, mut ext) = pair();
         let reader = host_side.try_clone().unwrap();
         thread::spawn(move || serve(listener, reader, host_side));
 
         // Клиент шлёт вызов и уходит, не дождавшись ответа (вопрос висит).
-        let mut a = UnixStream::connect(&sock).unwrap();
+        let mut a = ipc::connect(&sock).unwrap();
         let req = Value::obj(vec![
             ("id", Value::Num(1.0)),
             ("tool", Value::str("click")),
@@ -368,8 +362,8 @@ mod tests {
     #[test]
     fn host_exits_when_firefox_closes() {
         let home = TempHome::new("cl");
-        let listener = UnixListener::bind(home.0.join("s.sock")).unwrap();
-        let (host_side, ext_side) = UnixStream::pair().unwrap();
+        let listener = ipc::bind(&home.0.join("s.sock")).unwrap();
+        let (host_side, ext_side) = pair();
         drop(ext_side);
         let reader = host_side.try_clone().unwrap();
         assert!(serve(listener, reader, host_side).is_ok());

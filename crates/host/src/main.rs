@@ -13,6 +13,7 @@
 mod client;
 mod frame;
 mod install;
+mod ipc;
 mod mcp;
 mod native;
 mod paths;
