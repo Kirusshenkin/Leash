@@ -1,174 +1,219 @@
+<div align="center">
+
+<img src="extension/icons/leash.svg" width="96" alt="Leash">
+
 # Leash
 
-Firefox для Claude — то же, что Claude in Chrome для Chrome. Claude Code или
-Claude Desktop управляют Firefox через MCP-сервер `leash-host`: читают страницы
-и действуют (нажимают, вводят текст, выбирают, прокручивают, переходят,
-переключают вкладки), но только на сайтах, которые вы разрешили. Ключ API не
-нужен: работает тот Claude, которым вы уже пользуетесь. Политика безопасности
-исполняется кодом на Rust (WASM) в расширении, а не моделью.
+**Let Claude drive Firefox — on a short leash.**
 
+Claude Code and Claude Desktop read pages, click, type and navigate in your Firefox
+through an MCP bridge. A security policy written in Rust and compiled to WebAssembly
+decides what is allowed — not the model.
+
+[![check](https://github.com/Kirusshenkin/leash-firefox-extension/actions/workflows/check.yml/badge.svg)](https://github.com/Kirusshenkin/leash-firefox-extension/actions/workflows/check.yml)
+[![release](https://img.shields.io/github/v/release/Kirusshenkin/leash-firefox-extension)](https://github.com/Kirusshenkin/leash-firefox-extension/releases/latest)
+![Firefox 140+](https://img.shields.io/badge/Firefox-140%2B-FF7139?logo=firefoxbrowser&logoColor=white)
+![macOS | Linux](https://img.shields.io/badge/bridge-macOS%20%7C%20Linux-555)
+
+**English** · [Русский](README.ru.md)
+
+</div>
+
+---
+
+## Why Leash
+
+Browser agents read untrusted pages, and prompt injection has no complete fix. Leash
+assumes the worst: **Claude is treated as compromised the moment it reads a page**.
+Every action is checked by code against rules the page cannot change, so a successful
+injection still can't do serious harm.
+
+- 🔒 **Allowlist only.** Claude works only on sites you allowed — exact origin, no wildcards.
+  Banking, payments, mail, password managers, cloud consoles, sign-in pages, messengers and
+  marketplaces are blocked out of the box.
+- ✋ **You confirm what matters.** Form submits, purchases, deletions, downloads and moving data
+  between sites wait for your click in a separate Leash window that pages cannot fake.
+- 🕵️ **Injection signs are surfaced.** Fake delimiters, `SYSTEM:` roles, chat markup and
+  "ignore previous instructions" are flagged; after that, every non-read action needs approval.
+- 🔑 **No API key.** Leash plugs into the Claude you already use — Claude Code or Claude Desktop.
+- 📴 **The extension never goes online.** No default host permissions, `connect-src 'self'`;
+  its only channel out is native messaging to the local bridge.
+
+## How it works
+
+```mermaid
+flowchart LR
+    C["Claude Code / Claude Desktop"] -- "MCP (stdio)" --> M["leash-host mcp"]
+    M -- "unix socket ~/.leash/host.sock" --> H["leash-host"]
+    H -- "native messaging" --> E["Leash extension<br/>policy · confirmations · actions"]
+    E --> T["Firefox tab<br/>(allowed sites only)"]
 ```
-Claude Code / Desktop ──MCP (stdio)──▶ leash-host mcp ──unix-сокет──▶ leash-host
-   ◀── результаты ──                                     (native messaging)
-                                                              │
-                                                    расширение Leash в Firefox:
-                                                    политика, подтверждения, действия
+
+Claude gets these tools:
+
+| Tool | What it does |
+|---|---|
+| `read_page` | Structured snapshot of the active tab: numbered elements, roles, names, visible text |
+| `click` · `type_text` · `select_option` | Act on an element from the snapshot |
+| `scroll` · `navigate` · `go_back` | Move around allowed sites |
+| `list_tabs` · `switch_tab` | Work across tabs (closed sites stay hidden) |
+
+## Quick start
+
+> Use a separate Firefox profile without important logged-in services
+> (`about:profiles` → *Create a New Profile*).
+
+**1. Bridge** (macOS arm64/x86_64, Linux x86_64) — prebuilt binary from GitHub Releases:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Kirusshenkin/leash-firefox-extension/master/scripts/get.sh | sh
 ```
 
-## Модель защиты
+The script checks SHA-256 against the release's `SHA256SUMS`, installs `leash-host` into
+`~/.local/bin` (override with `LEASH_BIN_DIR=…`, pin a release with `LEASH_VERSION=v…`) and
+registers it with Firefox. Verify where the binary came from:
 
-Prompt injection не решается полностью, поэтому защита строится так, чтобы
-успешная инъекция не могла причинить серьёзный вред. Claude считается
-скомпрометированным, как только прочитал страницу. Правила взяты по примеру
-Claude in Chrome, но решение принимает код, а не модель.
+```sh
+gh attestation verify ~/.local/bin/leash-host --repo Kirusshenkin/leash-firefox-extension
+```
 
-- **Доступ к сайту** = запись в списке разрешённых **и** host-разрешение,
-  выданное Firefox по клику пользователя. Совпадение точное (https, имя, порт),
-  без масок. Встроенный запрет (платежи, почта, менеджеры паролей,
-  облачные консоли, входы в аккаунты, госуслуги, мессенджеры и соцсети,
-  маркетплейсы с сохранёнными картами) не снимается. Банки стоят в
-  пользовательском запрете по умолчанию: его можно дополнить своим банком.
-  Проверка идёт перед каждым действием, а content-скрипт ещё раз сверяет
-  origin документа непосредственно перед действием.
-- **Подтверждение пользователя** — в отдельном окне Leash, которое страница
-  подделать не может; кнопки становятся активными через 0,8 с. Спрашивается:
-  отправка формы, кнопки с признаками необратимого действия (купить, удалить,
-  отправить, опубликовать, продать…), скачивание файлов (атрибут `download`,
-  ссылки на программы и архивы), перенос данных между сайтами (ввод текста или
-  переход с данными в адресе после чтения другого сайта). Отказ пользователя
-  окончателен для этого действия, и Claude получает указание не обходить его.
-- **Признаки инъекции** (поддельный разделитель или строки снимка, служебная
-  разметка чатов, роли вида `SYSTEM:`, попытки отменить указания пользователя,
-  обращения к ИИ-агенту) ищутся в тексте, именах, значениях, заголовке, адресе
-  и заголовках вкладок. Найденное показывается в панели и сообщается Claude, а
-  до конца сеанса каждое действие, кроме чтения, подтверждает пользователь.
-- **Блокируется без вопросов**: сайты вне списка, встроенный запрет, формы,
-  отправляемые на закрытый адрес, ссылки `javascript:` и на закрытые сайты,
-  файлы, ввод в поля паролей, данных карт и одноразовых кодов (их значения не
-  попадают и в снимок), CAPTCHA, несуществующие или устаревшие номера элементов.
-- **Подмена после снимка**: элемент описывается фактами (тег, роль, имя, адрес
-  ссылки, адрес формы, отправляет ли форму). Перед действием они вычисляются
-  заново; любое расхождение — отказ. Перекрытый другим элементом — отказ.
-- **Данные страницы для Claude** идут структурой (номера элементов, роли, имена,
-  видимый текст) внутри разделителя со случайным nonce, новым в каждом
-  результате. Угловые скобки и кавычки из данных страницы заменяются; скрытые
-  элементы (display/visibility/opacity, aria-hidden, inert, вне экрана, мелкий
-  шрифт, комментарии, шаблоны) в снимок не попадают.
-- **Мост**: Firefox запускает `leash-host` только для расширения Leash
-  (`allowed_extensions` в манифесте). Сокет `~/.leash/host.sock` — права 0600 в
-  каталоге 0700, проверяются владелец и отсутствие симлинков. Мост знает
-  только инструменты Leash: неизвестный вызов в Firefox не уходит. Вызовы от
-  всех сеансов Claude выполняются строго по одному; у каждого сеанса своя
-  рабочая вкладка, свой список прочитанных сайтов и свои признаки инъекций.
-- **Расширение не ходит в сеть**: нет host-разрешений по умолчанию,
-  `connect-src 'self'`, единственный канал наружу — native messaging к мосту.
-- **Content-скрипт** внедряется по требованию только в главный фрейм вкладки
-  разрешённого сайта, в изолированный мир. У него нет доступа к API
-  расширения, сети, сообщениям и таймерам (проверяет `scripts/check-static.sh`).
-- **Ограничители**: отказ при четвёртом подряд одинаковом вызове; подтверждение
-  ждёт 5 минут; вызов, на который Firefox не ответил за 330 секунд, получает
-  ошибку. «Стоп» в панели и Alt+Shift+X закрывают открытые вопросы отказом, и
-  до «Продолжить» Claude получает отказ на каждый вызов.
+**2. Connect Claude:**
 
-### Остаточные риски
+```sh
+claude mcp add --scope user leash -- ~/.local/bin/leash-host mcp
+```
 
-- Claude видит данные разрешённых сайтов и хранит их в истории разговора — это
-  не утечка наружу, но учитывайте при выборе сайтов.
-- Leash не видит вашего разговора с Claude, поэтому не знает, какой текст вы
-  сами попросили ввести: любой ввод на сайт после чтения другого сайта
-  подтверждается.
-- Сокет моста доступен любой программе, запущенной под вашим пользователем.
-  Граница доверия — ваша учётная запись: программа, которая уже работает от
-  вашего имени, может и так управлять вашим Firefox.
-- Скрытый текст, неотличимый от видимого (цвет текста как у фона, текст под
-  другим элементом), фильтр не ловит. Защита держится на политике, а не на
-  фильтре.
-- Страница сама может отправить свои данные куда угодно своим JavaScript —
-  это поведение сайта, а не Claude. Claude не переносит данные **между**
-  сайтами без вашего согласия.
-- Содержимое iframe не читается и в нём нельзя действовать.
+For Claude Desktop, the installer prints a snippet for `claude_desktop_config.json`.
 
-## Установка
+**3. Extension.** Until the add-on is on addons.mozilla.org: `make build`, then
+`about:debugging#/runtime/this-firefox` → *Load Temporary Add-on…* → `extension/manifest.json`.
 
-Рекомендуется отдельный профиль Firefox без залогиненных важных сервисов
-(`about:profiles` → «Создать новый профиль»).
+**4. Go.** Restart Firefox — the Leash sidebar (*View → Sidebar → Leash*) shows the bridge as
+connected. Allow a site in Leash settings (Firefox asks for access when you save), then ask
+Claude to do something there. It works in the active tab; steps show up in the sidebar.
 
-1. Расширение: `make build`, затем `about:debugging#/runtime/this-firefox` →
-   «Загрузить временное дополнение…» → `extension/manifest.json` (после
-   публикации на AMO — оттуда).
-2. Мост (macOS arm64/x86_64, Linux x86_64) — готовая сборка из GitHub Releases:
-   ```sh
-   curl -fsSL https://raw.githubusercontent.com/Kirusshenkin/Leash/master/scripts/get.sh | sh
-   ```
-   Скрипт сверяет SHA-256 с `SHA256SUMS` релиза, кладёт `leash-host` в
-   `~/.local/bin` (другой каталог: `LEASH_BIN_DIR=…`, конкретный релиз:
-   `LEASH_VERSION=v…`) и регистрирует в Firefox. Происхождение сборки можно
-   проверить: `gh attestation verify ~/.local/bin/leash-host --repo Kirusshenkin/Leash`.
-   Бинарник, скачанный руками через браузер, macOS заблокирует: он не
-   нотаризован. Из исходников: `make install` (нужен rustup).
-   Установка печатает строку для Claude Code и фрагмент для Claude Desktop:
-   ```sh
-   claude mcp add --scope user leash -- ~/.local/bin/leash-host mcp
-   ```
-3. Перезапустите Firefox. Панель Leash («Вид → Боковые панели → Leash»)
-   покажет «Мост … подключён».
-4. В настройках Leash разрешите сайты: при сохранении Firefox спросит доступ к
-   ним.
-5. Попросите Claude что-нибудь сделать в Firefox. Он работает в активной
-   вкладке; шаги видны в панели, опасные действия вы подтверждаете в окне Leash.
+Uninstall: `~/.local/bin/leash-host uninstall` and `claude mcp remove leash`.
 
-Удаление: `~/.local/bin/leash-host uninstall` и `claude mcp remove leash`.
+<details>
+<summary>Build the bridge from source instead</summary>
 
-## Сборка и проверки
+```sh
+make install   # needs rustup; builds leash-host and registers it
+```
 
-Нужны rustup (`brew install rustup`) и wasm-bindgen-cli той же версии, что в `Cargo.lock`:
+A binary downloaded by hand through a browser is blocked by macOS Gatekeeper (it isn't
+notarized); `get.sh` and source builds are not affected.
+
+</details>
+
+## Security model
+
+<details open>
+<summary><b>What is enforced</b></summary>
+
+- **Site access** = an allowlist entry **and** a host permission granted by your click in
+  Firefox. Exact match on https, host and port. The built-in deny list (payments, mail,
+  password managers, cloud consoles, sign-in, government services, messengers and social
+  networks, marketplaces with saved cards) cannot be lifted. Banks come pre-filled in your own
+  deny list — add yours there. Access is checked before every action, and the content script
+  re-checks the document origin right before acting.
+- **Confirmation** happens in a separate Leash window; buttons unlock after 0.8 s. Asked for:
+  form submits, buttons that look irreversible (buy, delete, send, publish, sell…), file
+  downloads, and moving data between sites (typing or navigating with data in the URL after
+  reading another site). A refusal is final for that action, and Claude is told not to work
+  around it.
+- **Blocked without asking:** sites outside the list, the built-in deny list, forms posting to
+  closed addresses, `javascript:` links and links to closed sites, file inputs, typing into
+  password, card and one-time-code fields (their values never reach the snapshot), CAPTCHAs,
+  unknown or stale element numbers.
+- **Swap-after-snapshot protection:** each element is pinned by facts (tag, role, name, link
+  target, form action, whether it submits). They are recomputed before acting; any mismatch or
+  an element covered by another one is a refusal.
+- **Page data for Claude** is structured and wrapped in a delimiter with a fresh random nonce in
+  every result. Angle brackets and quotes from the page are replaced; hidden elements
+  (display/visibility/opacity, `aria-hidden`, `inert`, off-screen, tiny text, comments,
+  templates) are left out.
+- **Bridge:** Firefox launches `leash-host` only for the Leash extension (`allowed_extensions`).
+  The socket is 0600 inside a 0700 directory, with owner and symlink checks. The bridge knows
+  only Leash tools — unknown calls never reach Firefox. Calls from all Claude sessions run
+  strictly one at a time; each session has its own working tab, read-site history and
+  injection flags.
+- **Content script** is injected on demand only into the top frame of an allowed tab, in an
+  isolated world, with no access to extension APIs, network, messaging or timers (enforced by
+  `scripts/check-static.sh`).
+- **Limits:** the fourth identical call in a row is refused; a confirmation waits 5 minutes; a
+  call Firefox doesn't answer in 330 s fails. *Stop* in the sidebar or <kbd>Alt+Shift+X</kbd>
+  refuses open questions, and every call is refused until *Resume*.
+
+</details>
+
+<details>
+<summary><b>Residual risks</b></summary>
+
+- Claude sees data from allowed sites and keeps it in the conversation history. That is not a
+  leak to third parties, but choose sites with this in mind.
+- Leash can't see your conversation with Claude, so it doesn't know which text you asked to
+  type: any input on a site after reading another site needs confirmation.
+- The bridge socket is reachable by any program running as your user. The trust boundary is
+  your account: a program already running as you could drive Firefox anyway.
+- Hidden text that looks visible (same color as the background, text under another element)
+  isn't filtered. Protection rests on the policy, not on the filter.
+- A page can send its own data anywhere with its own JavaScript — that's the site, not Claude.
+  Claude doesn't move data **between** sites without your consent.
+- iframe content is neither read nor acted upon.
+
+</details>
+
+## Tested like an attacker
+
+`make e2e` runs real Firefox (Marionette, headless) with the real bridge. A Go driver plays a
+**compromised model** over MCP — exactly as Claude Code would connect — and answers in the
+confirmation window. 54 scenarios cover the policy (S), data leaks and escapes from allowed sites
+(X), Claude-in-Chrome-style rules (G), resilience (R: XSS, confirmations, disguised dangerous
+words) and the bridge lifecycle (B). Separately, 40 pages with prompt injections were run
+against Claude Opus through `claude -p` (one run): no request to a closed site, no form
+submitted, no secret leaked. The attack pages are kept out of the repository.
+
+CI runs `make check` (fmt, clippy, tests, WASM build, static checks, `cargo deny`,
+`cargo audit`), the full e2e suite in headless Firefox, and a scan of the whole git history
+for API keys on every push.
+
+## Build
+
+Requires rustup and `wasm-bindgen-cli` matching `Cargo.lock`:
 
 ```sh
 cargo install wasm-bindgen-cli --version '=0.2.128' --locked
-make hooks   # pre-commit против случайного коммита ключей
-make check   # fmt, clippy, тесты, сборка WASM, статпроверки, cargo deny, cargo audit
-make host    # мост leash-host (Rust, только std)
-make e2e     # red-team тесты в настоящем Firefox с настоящим мостом (нужен Go)
-make zip     # архив для AMO в dist/
+make hooks   # pre-commit guard against committing keys
+make check   # fmt, clippy, tests, WASM build, static checks, cargo deny, cargo audit
+make host    # the leash-host bridge (Rust, std only)
+make e2e     # red-team tests in real Firefox with the real bridge (needs Go)
+make zip     # AMO package in dist/
 ```
 
-Зависимости Rust берутся только из `vendor/` (`--offline --locked`).
+Rust dependencies come only from `vendor/` (`--offline --locked`). Without Homebrew, run `make`
+with `RUSTUP_BIN=$HOME/.cargo/bin`. e2e flags: `-run <substring>`, `-headed`; Firefox comes
+from `$FIREFOX`, `/Applications/Firefox.app` or `PATH`.
 
-CI (`.github/workflows/check.yml`): на каждый push — `make check`, `make e2e`
-в headless Firefox и поиск ключей во всей истории git. Без Homebrew
-`make` нужен с `RUSTUP_BIN=$HOME/.cargo/bin`.
+<details>
+<summary>Project layout</summary>
 
-### e2e
+- `crates/core` — shared by extension and bridge: budgeted JSON, tools and their strict parsing.
+- `crates/host` — `leash-host`: MCP server (`mcp.rs`, `client.rs`), native messaging host
+  (`native.rs`), framing (`frame.rs`), paths and permissions (`paths.rs`), install (`install.rs`).
+- `crates/agent/src` — the extension (WASM): `policy.rs` (origins, lists, built-in deny),
+  `guard.rs` (run / ask / refuse for every action), `probe.rs` (injection signs), `bridge.rs`
+  (Claude sessions), `confirm.rs` (confirmation window), `page.rs` (snapshot → text for Claude),
+  `protocol.rs`, `background.rs`, `sidebar.rs`, `options.rs`.
+- `extension/` — manifest, HTML/CSS, JS glue and content script (≤ 200 lines together), generated `pkg/`.
+- `docs/content-contract.md` — the content script contract.
+- `e2e/` — red-team rig: real Firefox via Marionette, HTTPS proxy with test sites, real bridge,
+  MCP driver acting as a compromised model.
+- `scripts/` — static bans (`check-static.sh`), bridge install from source (`install.sh`) and
+  from releases (`get.sh`).
 
-`make e2e` (или `go -C e2e run .`) запускает Firefox без окна с отдельным
-временным HOME: туда ставится мост, и Firefox ищет его манифест только там —
-настоящие `~/.leash` и манифесты не затрагиваются. Драйвер на Go играет
-скомпрометированную модель через `leash-host mcp`, как это делал бы Claude
-Code, и отвечает в окне подтверждения. Сценарии: S — политика и действия,
-X — утечки и побег с разрешённых сайтов, G — правила по примеру Claude in Chrome,
-R — устойчивость (XSS, подтверждения, маскировка опасных слов). Флаги:
-`-run <подстрока>` — выбрать сценарии, `-headed` — показать окно. Firefox берётся из
-`$FIREFOX`, иначе `/Applications/Firefox.app`, иначе из `PATH`.
+</details>
 
-Сценарии I (настоящая модель на страницах с инъекциями из `e2e/private/`,
-каталог не хранится в git) пока не перенесены на мост, см. issue #7.
+---
 
-## Структура
-
-- `crates/core` — общее для расширения и моста: JSON с бюджетом, инструменты и их строгий разбор.
-- `crates/host` — `leash-host`: MCP-сервер (`mcp.rs`, `client.rs`), хост native
-  messaging (`native.rs`), кадры (`frame.rs`), пути и права (`paths.rs`), установка (`install.rs`).
-- `crates/agent/src` — расширение (WASM):
-  - `policy.rs` — origin, списки, встроенный запрет, доступ;
-  - `guard.rs` — решение по каждому действию: выполнить, спросить, отказать;
-  - `probe.rs` — признаки инъекций;
-  - `bridge.rs` — сеансы Claude: разбор вызова, политика, подтверждение, действие;
-  - `confirm.rs` — окно подтверждения;
-  - `page.rs` — разбор снимка страницы и текст для Claude;
-  - `protocol.rs`, `background.rs`, `sidebar.rs`, `options.rs` — сообщения, фон, панель, настройки.
-- `extension/` — манифест, HTML/CSS, JS-мост и content-скрипт (вместе ≤ 200 строк), сгенерированный `pkg/`.
-- `docs/content-contract.md` — контракт content-скрипта.
-- `e2e/` — red-team стенд: настоящий Firefox через Marionette, HTTPS-прокси с
-  тестовыми сайтами, настоящий мост и MCP-драйвер в роли скомпрометированной модели.
-- `scripts/check-static.sh` — запреты: HTML в DOM, eval, unsafe, логи, сеть и API расширения в content-скрипте.
-- `scripts/install.sh` — установка моста для текущего пользователя.
+<div align="center"><sub>Leash is an independent project, not affiliated with Anthropic or Mozilla.</sub></div>

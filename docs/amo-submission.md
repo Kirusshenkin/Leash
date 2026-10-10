@@ -41,7 +41,8 @@ make build
   вкладки сайта, который пользователь явно разрешил.
 - `nativeMessaging` — связь с программой leash-host на компьютере
   пользователя (MCP-сервер для Claude Code и Claude Desktop, исходники в
-  `crates/host`, ставится отдельно: `make install`). Это единственный канал
+  `crates/host`, ставится отдельно: готовая сборка из GitHub Releases через
+  `scripts/get.sh` или `make install`). Это единственный канал
   наружу: сетевых запросов расширение не делает (`connect-src 'self'`, нет
   `host_permissions`).
 - `optional_host_permissions: https://*/*` — запрашиваются по одному сайту
