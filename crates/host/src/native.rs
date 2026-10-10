@@ -599,6 +599,7 @@ mod tests {
         });
     }
 
+    #[cfg(test)]
     #[cfg(unix)]
     #[test]
     fn calls_reach_extension_and_come_back() {
@@ -645,6 +646,7 @@ mod tests {
         );
     }
 
+    #[cfg(test)]
     #[cfg(unix)]
     #[test]
     fn client_gone_mid_call_ends_session_at_once() {
@@ -700,6 +702,7 @@ mod tests {
         assert_eq!(answer.join().unwrap(), ("ok".into(), false));
     }
 
+    #[cfg(test)]
     #[cfg(unix)]
     #[test]
     fn host_exits_when_firefox_closes() {
@@ -713,6 +716,7 @@ mod tests {
 
     /// Test Windows named pipe IPC round-trip (server + client in same process).
     /// This tests that PipeListener can accept connections and exchange messages.
+    #[cfg(test)]
     #[cfg(windows)]
     #[test]
     fn windows_pipe_round_trip() {
