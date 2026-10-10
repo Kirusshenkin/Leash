@@ -154,7 +154,6 @@ pub mod tests {
         }
     }
 
-    #[cfg(test)]
     #[cfg(unix)]
     #[test]
     fn private_dir_is_created_closed() {
@@ -166,7 +165,6 @@ pub mod tests {
         ensure_private_dir(&dir, &home.0).unwrap();
     }
 
-    #[cfg(test)]
     #[cfg(unix)]
     #[test]
     fn open_or_linked_dir_is_refused() {
@@ -184,7 +182,6 @@ pub mod tests {
         assert!(ensure_private_dir(&link, &home.0).is_err());
     }
 
-    #[cfg(test)]
     #[cfg(unix)]
     #[test]
     fn layout() {
