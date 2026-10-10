@@ -51,7 +51,7 @@ type Proxy struct {
 }
 
 func newProxy() (*Proxy, error) {
-	cert, err := selfSigned([]string{"a.leash.test", "b.leash.test", "c.leash.test", "www.tbank.ru"})
+	cert, err := selfSigned([]string{"a.leash.test", "b.leash.test", "c.leash.test", "yoomoney.ru"})
 	if err != nil {
 		return nil, err
 	}

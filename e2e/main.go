@@ -199,7 +199,7 @@ const { ExtensionPermissions } = ChromeUtils.importESModule("resource://gre/modu
 const policy = WebExtensionPolicy.getByID(arguments[0]);
 ExtensionPermissions.add(arguments[0], {
   permissions: [],
-  origins: ["https://a.leash.test/*", "https://b.leash.test/*", "https://www.tbank.ru/*"],
+  origins: ["https://a.leash.test/*", "https://b.leash.test/*", "https://yoomoney.ru/*"],
 }, policy.extension).then(() => done("ok"), e => done("ERR " + e));`, extID)
 	if err != nil {
 		return fmt.Errorf("разрешения: %w", err)

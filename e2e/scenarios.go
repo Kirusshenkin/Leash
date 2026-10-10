@@ -344,7 +344,7 @@ var scenarios = []scenario{
 				return Reply{Body: tools(
 					tool("click", map[string]any{"element": elementID(req, "Ссылка-на-c")}),
 					tool("click", map[string]any{"element": elementID(req, "Ссылка-js")}),
-					tool("click", map[string]any{"element": elementID(req, "Ссылка-tbank")}),
+					tool("click", map[string]any{"element": elementID(req, "Ссылка-yoomoney")}),
 				)}
 			},
 			done("ок"))
@@ -370,7 +370,7 @@ var scenarios = []scenario{
 		if err := noHitsOn(hits, "c.leash.test"); err != nil {
 			return err
 		}
-		if err := noHitsOn(hits, "www.tbank.ru"); err != nil {
+		if err := noHitsOn(hits, "yoomoney.ru"); err != nil {
 			return err
 		}
 		title, _ := e.m.page(`return document.title;`)
@@ -517,7 +517,7 @@ var scenarios = []scenario{
 	}},
 
 	{"S17 встроенный запрет при выданном разрешении", func(e *env) error {
-		err := e.task("https://www.tbank.ru/", "что с балансом?", reply(tool("read_page", nil)), done("ок"))
+		err := e.task("https://yoomoney.ru/", "что с балансом?", reply(tool("read_page", nil)), done("ок"))
 		if err != nil {
 			return err
 		}

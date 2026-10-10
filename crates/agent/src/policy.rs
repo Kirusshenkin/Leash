@@ -2,8 +2,10 @@
 //!
 //! Сравнение — по точному origin: только https, хост и порт совпадают
 //! буквально, без масок. Запрет сильнее разрешения: встроенный список
-//! (банки, платежи, почта, менеджеры паролей, облачные консоли, входы в
-//! аккаунты) пользователь снять не может. Сайт вне allowlist закрыт.
+//! (платежи, почта, менеджеры паролей, облачные консоли, входы в аккаунты,
+//! мессенджеры, маркетплейсы) пользователь снять не может. Банки — в
+//! пользовательском запрете по умолчанию ([`DEFAULT_DENY`]): их слишком много
+//! для полного встроенного списка. Сайт вне allowlist закрыт.
 //!
 //! Разбор адреса намеренно строже браузерного: всё, что браузер мог бы
 //! прочитать иначе, чем мы (`@`, `\`, `%`, IP-адреса, не-ASCII), отклоняется.
@@ -35,47 +37,33 @@ const LOCAL_SUFFIXES: &[&str] = &[
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Category {
-    Bank,
     Payment,
     Mail,
     Passwords,
     Cloud,
     Account,
     Government,
+    Messenger,
+    Marketplace,
 }
 
 impl Category {
     pub(crate) fn describe(self) -> &'static str {
         match self {
-            Self::Bank => "банк",
             Self::Payment => "платежи и криптовалюта",
             Self::Mail => "почта",
             Self::Passwords => "менеджер паролей",
             Self::Cloud => "облачная консоль",
             Self::Account => "вход в аккаунт",
             Self::Government => "госуслуги",
+            Self::Messenger => "мессенджер или соцсеть",
+            Self::Marketplace => "магазин с сохранённой картой",
         }
     }
 }
 
 /// Встроенный запрет. Хост закрыт вместе со всеми поддоменами.
 pub(crate) const BUILTIN_DENY: &[(&str, Category)] = &[
-    // Банки. Список не полон: пользователь дополняет его своим.
-    ("chase.com", Category::Bank),
-    ("bankofamerica.com", Category::Bank),
-    ("wellsfargo.com", Category::Bank),
-    ("citi.com", Category::Bank),
-    ("hsbc.com", Category::Bank),
-    ("barclays.co.uk", Category::Bank),
-    ("monzo.com", Category::Bank),
-    ("sberbank.ru", Category::Bank),
-    ("sber.ru", Category::Bank),
-    ("tbank.ru", Category::Bank),
-    ("tinkoff.ru", Category::Bank),
-    ("alfabank.ru", Category::Bank),
-    ("vtb.ru", Category::Bank),
-    ("gazprombank.ru", Category::Bank),
-    ("raiffeisen.ru", Category::Bank),
     // Платежи и криптовалюта.
     ("paypal.com", Category::Payment),
     ("stripe.com", Category::Payment),
@@ -143,7 +131,50 @@ pub(crate) const BUILTIN_DENY: &[(&str, Category)] = &[
     ("gosuslugi.ru", Category::Government),
     ("nalog.gov.ru", Category::Government),
     ("login.gov", Category::Government),
+    // Мессенджеры и соцсети: читать переписку агенту незачем.
+    ("web.telegram.org", Category::Messenger),
+    ("web.whatsapp.com", Category::Messenger),
+    ("web.max.ru", Category::Messenger),
+    ("messenger.com", Category::Messenger),
+    ("facebook.com", Category::Messenger),
+    ("instagram.com", Category::Messenger),
+    ("discord.com", Category::Messenger),
+    ("vk.com", Category::Messenger),
+    ("ok.ru", Category::Messenger),
+    // Маркетплейсы с сохранёнными картами и покупкой в один клик.
+    ("amazon.com", Category::Marketplace),
+    ("amazon.co.uk", Category::Marketplace),
+    ("amazon.de", Category::Marketplace),
+    ("ebay.com", Category::Marketplace),
+    ("aliexpress.com", Category::Marketplace),
+    ("aliexpress.ru", Category::Marketplace),
+    ("ozon.ru", Category::Marketplace),
+    ("wildberries.ru", Category::Marketplace),
+    ("market.yandex.ru", Category::Marketplace),
+    ("avito.ru", Category::Marketplace),
 ];
+
+/// Пользовательский запрет, пока пользователь не сохранил свой: банки. Их
+/// слишком много для встроенного списка, поэтому они здесь, и пользователь
+/// дополняет список своим банком или правит его.
+pub(crate) const DEFAULT_DENY: &str = "\
+# Банки. Допишите свой банк.
+chase.com
+bankofamerica.com
+wellsfargo.com
+citi.com
+hsbc.com
+barclays.co.uk
+monzo.com
+sberbank.ru
+sber.ru
+tbank.ru
+tinkoff.ru
+alfabank.ru
+vtb.ru
+gazprombank.ru
+raiffeisen.ru
+";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OriginError {
@@ -505,9 +536,10 @@ impl Policy {
         &self.allow
     }
 
-    /// Политика из хранилища. Неразборчивые списки закрывают всё.
+    /// Политика из хранилища. Неразборчивые списки закрывают всё; пока
+    /// запрет не сохранён, действует [`DEFAULT_DENY`].
     pub(crate) fn from_storage(allow: Option<&str>, deny: Option<&str>) -> Self {
-        Self::parse(allow.unwrap_or_default(), deny.unwrap_or_default()).unwrap_or_default()
+        Self::parse(allow.unwrap_or_default(), deny.unwrap_or(DEFAULT_DENY)).unwrap_or_default()
     }
 }
 
@@ -690,8 +722,8 @@ mod tests {
             Err(Denied::Builtin(Category::Mail))
         );
         assert_eq!(
-            p.check("https://online.sberbank.ru."),
-            Err(Denied::Builtin(Category::Bank))
+            p.check("https://web.telegram.org/k/"),
+            Err(Denied::Builtin(Category::Messenger))
         );
         for url in [
             "https://notpaypal.com",
@@ -701,6 +733,21 @@ mod tests {
         ] {
             assert_eq!(p.check(url), Err(Denied::NotAllowed), "{url}");
         }
+    }
+
+    #[test]
+    fn default_deny_until_user_saves_own() {
+        assert!(Policy::parse("", DEFAULT_DENY).is_ok());
+        let p = Policy::from_storage(None, None);
+        assert_eq!(p.check("https://online.sberbank.ru"), Err(Denied::UserList));
+        // Банк в allowlist при запрете по умолчанию — ошибка списков, закрыто всё.
+        assert_eq!(
+            Policy::from_storage(Some("online.sberbank.ru"), None),
+            Policy::default()
+        );
+        // Сохранённый пустой запрет — выбор пользователя, банк открыт.
+        let p = Policy::from_storage(Some("online.sberbank.ru"), Some(""));
+        assert!(p.check("https://online.sberbank.ru").is_ok());
     }
 
     #[test]

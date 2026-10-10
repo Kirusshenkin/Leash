@@ -83,15 +83,10 @@ async fn load(page: Page) {
     let Ok(stored) = JsFuture::from(ext::storage_local_get(&names)).await else {
         return say(&page, "Не удалось прочитать настройки.");
     };
-    let text = |key| {
-        ext::get(&stored, key)
-            .and_then(|v| v.as_string())
-            .unwrap_or_default()
-    };
-    let (allow, deny) = (
-        text(settings::KEY_ALLOW_ORIGINS),
-        text(settings::KEY_DENY_HOSTS),
-    );
+    let text = |key| ext::get(&stored, key).and_then(|v| v.as_string());
+    let allow = text(settings::KEY_ALLOW_ORIGINS).unwrap_or_default();
+    // Пока запрет не сохранён, в поле стоит запрет по умолчанию (банки).
+    let deny = text(settings::KEY_DENY_HOSTS).unwrap_or_else(|| policy::DEFAULT_DENY.to_owned());
     page.allow.set_value(&allow);
     page.deny.set_value(&deny);
     // Неразборчивые списки не принимаются частично: проверка идёт по пустой

