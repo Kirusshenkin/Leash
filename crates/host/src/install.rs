@@ -87,7 +87,7 @@ pub fn uninstall(home: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn register_in_registry(exe: &Path) -> io::Result<()> {
+fn register_in_registry(_exe: &Path) -> io::Result<()> {
     // Firefox ищет манифест native messaging в реестре:
     // HKCU\Software\Mozilla\NativeMessagingHosts\leash
     // Значение REG_SZ "Default" должно быть путём к манифесту.

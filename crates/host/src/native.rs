@@ -579,6 +579,7 @@ mod tests {
     use crate::paths::tests::TempHome;
 
     /// Расширение-заглушка: отвечает на вызовы и записывает всё, что получило.
+    #[cfg(unix)]
     fn fake_extension(mut ext: UnixStream, seen: Arc<Mutex<Vec<Value>>>) {
         thread::spawn(move || {
             let mut reader = ext.try_clone().unwrap();
@@ -599,6 +600,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn calls_reach_extension_and_come_back() {
         let home = TempHome::new("nv");
         let sock = home.0.join("s.sock");
@@ -644,6 +646,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn client_gone_mid_call_ends_session_at_once() {
         let home = TempHome::new("gn");
         let sock = home.0.join("s.sock");
@@ -698,6 +701,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn host_exits_when_firefox_closes() {
         let home = TempHome::new("cl");
         let listener = UnixListener::bind(home.0.join("s.sock")).unwrap();

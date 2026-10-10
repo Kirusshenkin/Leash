@@ -86,7 +86,7 @@ impl Firefox {
     }
 
     #[cfg(windows)]
-    fn try_call(&mut self, tool: &str, input: &Value) -> io::Result<(String, bool)> {
+    fn try_call(&mut self, _tool: &str, _input: &Value) -> io::Result<(String, bool)> {
         use crate::native::windows_ipc;
         use std::sync::{Arc, Mutex};
 

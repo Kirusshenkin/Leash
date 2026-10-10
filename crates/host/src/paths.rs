@@ -62,6 +62,7 @@ pub fn socket_path(home: &Path) -> io::Result<PathBuf> {
     {
         // На Windows вычисляемый путь не используется (используется имя канала).
         // Возвращаем пустой путь как плейсхолдер.
+        let _ = home;
         Ok(PathBuf::new())
     }
 }
