@@ -53,7 +53,8 @@ zip: check
 	mkdir -p dist
 	rm -f dist/leash-$(VERSION).zip
 	cd extension && zip -r -X ../dist/leash-$(VERSION).zip manifest.json ui.css background sidebar options confirm content icons pkg
-	@for f in manifest.json background/background.js content/content.js sidebar/sidebar.html options/options.html confirm/confirm.html confirm/confirm.js pkg/leash_bg.wasm; do \
+	zip -X -j dist/leash-$(VERSION).zip LICENSE
+	@for f in LICENSE manifest.json background/background.js content/content.js sidebar/sidebar.html options/options.html confirm/confirm.html confirm/confirm.js pkg/leash_bg.wasm; do \
 		unzip -l dist/leash-$(VERSION).zip | grep -q " $$f$$" || { echo "в архиве нет $$f"; exit 1; }; \
 	done
 

@@ -14,6 +14,7 @@ Claude Code и Claude Desktop читают страницы, нажимают, �
 [![release](https://img.shields.io/github/v/release/Kirusshenkin/leash-firefox-extension)](https://github.com/Kirusshenkin/leash-firefox-extension/releases/latest)
 ![Firefox 140+](https://img.shields.io/badge/Firefox-140%2B-FF7139?logo=firefoxbrowser&logoColor=white)
 ![macOS | Linux](https://img.shields.io/badge/bridge-macOS%20%7C%20Linux-555)
+[![License: MPL 2.0](https://img.shields.io/badge/license-MPL--2.0-brightgreen)](LICENSE)
 
 [English](README.md) · **Русский**
 
@@ -220,6 +221,11 @@ make zip     # архив для AMO в dist/
   (`install.sh`) и из релизов (`get.sh`).
 
 </details>
+
+## Лицензия
+
+[Mozilla Public License 2.0](LICENSE). Leash можно использовать в любом проекте, в том числе
+закрытом; изменения в самих файлах Leash при распространении остаются открытыми.
 
 ---
 

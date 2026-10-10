@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "leash"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "js-sys",
  "leash-core",
@@ -61,11 +61,11 @@ dependencies = [
 
 [[package]]
 name = "leash-core"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "leash-host"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "leash-core",
 ]
