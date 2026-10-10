@@ -13,7 +13,7 @@ Claude Code и Claude Desktop читают страницы, нажимают, �
 [![check](https://github.com/Kirusshenkin/leash-firefox-extension/actions/workflows/check.yml/badge.svg)](https://github.com/Kirusshenkin/leash-firefox-extension/actions/workflows/check.yml)
 [![release](https://img.shields.io/github/v/release/Kirusshenkin/leash-firefox-extension)](https://github.com/Kirusshenkin/leash-firefox-extension/releases/latest)
 ![Firefox 140+](https://img.shields.io/badge/Firefox-140%2B-FF7139?logo=firefoxbrowser&logoColor=white)
-![macOS | Linux](https://img.shields.io/badge/bridge-macOS%20%7C%20Linux-555)
+![macOS | Linux | Windows](https://img.shields.io/badge/bridge-macOS%20%7C%20Linux%20%7C%20Windows%20preview-555)
 [![License: MPL 2.0](https://img.shields.io/badge/license-MPL--2.0-brightgreen)](LICENSE)
 
 [English](README.md) · **Русский**
@@ -80,6 +80,17 @@ curl -fsSL https://raw.githubusercontent.com/Kirusshenkin/leash-firefox-extensio
 gh attestation verify ~/.local/bin/leash-host --repo Kirusshenkin/leash-firefox-extension
 ```
 
+**Windows (preview):** в PowerShell
+
+```powershell
+irm https://raw.githubusercontent.com/Kirusshenkin/leash-firefox-extension/master/scripts/get.ps1 | iex
+```
+
+Ставит `leash-host.exe` в `%LOCALAPPDATA%\Leash\bin` и регистрирует его в
+`HKCU\Software\Mozilla\NativeMessagingHosts\leash`. Мост для Windows проверен в CI (сборка,
+канал, реестр), но ещё не прогнан целиком с настоящим Firefox на Windows. Дальше выполните
+строку `claude mcp add`, которую напечатает установка.
+
 **2. Подключить Claude:**
 
 ```sh
@@ -141,7 +152,9 @@ make install   # нужен rustup; собирает leash-host и регист�
   комментарии, шаблоны) в снимок не попадают.
 - **Мост:** Firefox запускает `leash-host` только для расширения Leash
   (`allowed_extensions`). Сокет — права 0600 в каталоге 0700, проверяются владелец и
-  отсутствие симлинков. Мост знает только инструменты Leash: неизвестный вызов в Firefox
+  отсутствие симлинков. На Windows канал — TCP только на 127.0.0.1 со случайным секретным
+  токеном в `%LOCALAPPDATA%\Leash` (его читает только ваша учётная запись); без токена
+  соединение закрывается. Мост знает только инструменты Leash: неизвестный вызов в Firefox
   не уходит. Вызовы всех сеансов Claude выполняются строго по одному; у каждого сеанса своя
   рабочая вкладка, свой список прочитанных сайтов и свои признаки инъекций.
 - **Content-скрипт** внедряется по требованию только в главный фрейм вкладки разрешённого

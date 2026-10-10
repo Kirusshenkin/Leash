@@ -45,6 +45,38 @@ jobs:
           cargo install --locked cargo-audit --version =0.22.2
       - run: make check
 
+  # Мост на Windows: тесты канала (TCP 127.0.0.1 с токеном), clippy и
+  # регистрация в реестре. e2e с настоящим Firefox здесь не идёт: стенд на Go
+  # пока только для macOS и Linux.
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Тесты и clippy моста
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          cargo test --locked --offline -p leash-host -p leash-core
+          cargo clippy --locked --offline -p leash-host -p leash-core --all-targets -- -D warnings
+      - name: Регистрация в Firefox через реестр
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --locked --offline -p leash-host
+          if ($LASTEXITCODE -ne 0) { throw 'сборка' }
+          ./target/debug/leash-host.exe install
+          if ($LASTEXITCODE -ne 0) { throw 'install' }
+          $key = 'HKCU:\Software\Mozilla\NativeMessagingHosts\leash'
+          $manifest = (Get-ItemProperty $key).'(default)'
+          $m = Get-Content -Raw $manifest | ConvertFrom-Json
+          if ($m.allowed_extensions -ne 'leash@kirusshenkin.github.io') { throw 'allowed_extensions' }
+          if (-not (Test-Path $m.path)) { throw "в манифесте неверный путь: $($m.path)" }
+          ./target/debug/leash-host.exe uninstall
+          if ($LASTEXITCODE -ne 0) { throw 'uninstall' }
+          if (Test-Path $key) { throw 'ключ реестра не удалён' }
+
   e2e:
     runs-on: ubuntu-24.04
     needs: check

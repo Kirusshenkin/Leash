@@ -13,7 +13,7 @@ decides what is allowed — not the model.
 [![check](https://github.com/Kirusshenkin/leash-firefox-extension/actions/workflows/check.yml/badge.svg)](https://github.com/Kirusshenkin/leash-firefox-extension/actions/workflows/check.yml)
 [![release](https://img.shields.io/github/v/release/Kirusshenkin/leash-firefox-extension)](https://github.com/Kirusshenkin/leash-firefox-extension/releases/latest)
 ![Firefox 140+](https://img.shields.io/badge/Firefox-140%2B-FF7139?logo=firefoxbrowser&logoColor=white)
-![macOS | Linux](https://img.shields.io/badge/bridge-macOS%20%7C%20Linux-555)
+![macOS | Linux | Windows](https://img.shields.io/badge/bridge-macOS%20%7C%20Linux%20%7C%20Windows%20preview-555)
 [![License: MPL 2.0](https://img.shields.io/badge/license-MPL--2.0-brightgreen)](LICENSE)
 
 **English** · [Русский](README.ru.md)
@@ -78,6 +78,17 @@ registers it with Firefox. Verify where the binary came from:
 gh attestation verify ~/.local/bin/leash-host --repo Kirusshenkin/leash-firefox-extension
 ```
 
+**Windows (preview):** in PowerShell
+
+```powershell
+irm https://raw.githubusercontent.com/Kirusshenkin/leash-firefox-extension/master/scripts/get.ps1 | iex
+```
+
+Installs `leash-host.exe` into `%LOCALAPPDATA%\Leash\bin` and registers it under
+`HKCU\Software\Mozilla\NativeMessagingHosts\leash`. The Windows bridge is tested in CI
+(build, channel, registry) but not yet end to end with a real Firefox on Windows. Then run the
+`claude mcp add` line the installer prints.
+
 **2. Connect Claude:**
 
 ```sh
@@ -135,7 +146,9 @@ notarized); `get.sh` and source builds are not affected.
   (display/visibility/opacity, `aria-hidden`, `inert`, off-screen, tiny text, comments,
   templates) are left out.
 - **Bridge:** Firefox launches `leash-host` only for the Leash extension (`allowed_extensions`).
-  The socket is 0600 inside a 0700 directory, with owner and symlink checks. The bridge knows
+  The socket is 0600 inside a 0700 directory, with owner and symlink checks. On Windows the
+  channel is TCP on 127.0.0.1 only, guarded by a random secret token stored in
+  `%LOCALAPPDATA%\Leash` (readable only by your account); connections without it are dropped. The bridge knows
   only Leash tools — unknown calls never reach Firefox. Calls from all Claude sessions run
   strictly one at a time; each session has its own working tab, read-site history and
   injection flags.
