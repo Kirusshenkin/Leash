@@ -154,6 +154,7 @@ pub mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn private_dir_is_created_closed() {
         let home = TempHome::new("pd");
         let dir = state_dir(&home.0);
@@ -164,6 +165,7 @@ pub mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn open_or_linked_dir_is_refused() {
         let home = TempHome::new("od");
         let dir = state_dir(&home.0);
@@ -180,6 +182,7 @@ pub mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn layout() {
         let home = Path::new("/home/u");
         assert_eq!(

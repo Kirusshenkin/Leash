@@ -88,17 +88,59 @@ pub fn uninstall(home: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn register_in_registry(exe: &Path) -> io::Result<()> {
-    // На Windows нужно создать запись в HKCU\Software\Mozilla\NativeMessagingHosts\leash
-    // с путём к манифесту. Из-за ограничения на unsafe, это должно быть в отдельном
-    // бинарнике или использовать winreg crate (пока пропускаем реальную реализацию).
-    // TODO: Реализовать реестр на Windows через FFI или syscall
-    eprintln!("Примечание: реестр Windows настроится при первом запуске Firefox");
+    // Firefox ищет манифест native messaging в реестре:
+    // HKCU\Software\Mozilla\NativeMessagingHosts\leash
+    // Значение REG_SZ "Default" должно быть путём к манифесту.
+    // Используем reg.exe, так как FFI для реестра требует много боilerplate.
+    use std::process::Command;
+
+    let home = std::env::var_os("USERPROFILE")
+        .ok_or_else(|| io::Error::other("USERPROFILE не задан"))?;
+    let home_path = Path::new(&home);
+    let manifest = paths::manifest_path(home_path);
+
+    // Проверяем что манифест существует
+    if !manifest.exists() {
+        return Err(io::Error::other(
+            "Манифест не найден. Сначала запустите: leash-host install"
+        ));
+    }
+
+    let manifest_str = manifest.to_string_lossy().to_string();
+    let key = "HKEY_CURRENT_USER\\Software\\Mozilla\\NativeMessagingHosts\\leash";
+
+    // Используем reg.exe (встроена в Windows)
+    let output = Command::new("reg")
+        .args(&["add", key, "/ve", "/d", &manifest_str, "/f"])
+        .output()
+        .map_err(|e| io::Error::other(format!("Не удалось запустить reg.exe: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("Ошибка реестра: {}", stderr);
+        return Err(io::Error::other("Не удалось зарегистрировать в реестре"));
+    }
+
     Ok(())
 }
 
 #[cfg(windows)]
 fn unregister_from_registry() -> io::Result<()> {
-    // TODO: Реализовать удаление из реестра
+    // Удаляем ключ реестра HKCU\Software\Mozilla\NativeMessagingHosts\leash
+    use std::process::Command;
+
+    let key = "HKEY_CURRENT_USER\\Software\\Mozilla\\NativeMessagingHosts\\leash";
+
+    let output = Command::new("reg")
+        .args(&["delete", key, "/f"])
+        .output()
+        .map_err(|e| io::Error::other(format!("Не удалось запустить reg.exe: {}", e)))?;
+
+    if !output.status.success() {
+        // Ошибка нормальна, если ключа не было
+        return Ok(());
+    }
+
     Ok(())
 }
 

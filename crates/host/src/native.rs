@@ -33,7 +33,7 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(330);
 const WATCH_EVERY: Duration = Duration::from_millis(250);
 
 #[cfg(windows)]
-mod windows_ipc {
+pub mod windows_ipc {
     //! Windows named pipe IPC. Unsafe FFI для работы с Win32 API.
     //! Модуль изолирует весь unsafe код для Windows поддержки.
 
@@ -43,11 +43,18 @@ mod windows_ipc {
     use std::ptr;
 
     // Windows API типы и константы
-    type Handle = *mut ();
+    #[derive(Debug, Clone, Copy)]
+    pub struct Handle(*mut ());
+    // HANDLE (*mut ()) не является Send по умолчанию, но нам нужно передавать
+    // его между потоками. Это безопасно, так как HANDLE — это просто непрозрачный
+    // дескриптор, и Windows обеспечивает синхронизацию.
+    unsafe impl Send for Handle {}
+    unsafe impl Sync for Handle {}
+
     type Bool = i32;
     type DWord = u32;
 
-    const INVALID_HANDLE_VALUE: Handle = -1i32 as *mut ();
+    const INVALID_HANDLE_VALUE: Handle = Handle(-1i32 as *mut ());
     const GENERIC_READ: DWord = 0x80000000;
     const GENERIC_WRITE: DWord = 0x40000000;
     const PIPE_ACCESS_DUPLEX: DWord = 0x00000003;
@@ -57,7 +64,7 @@ mod windows_ipc {
     const OPEN_EXISTING: DWord = 3;
 
     // Минимальные Windows API bindings
-    extern "system" {
+    unsafe extern "system" {
         fn CreateNamedPipeA(
             lpName: *const u8,
             dwOpenMode: DWord,
@@ -111,7 +118,7 @@ mod windows_ipc {
             let mut bytes_read = 0u32;
             let result = unsafe {
                 ReadFile(
-                    self.handle,
+                    self.handle.0,
                     buf.as_mut_ptr(),
                     buf.len() as u32,
                     &mut bytes_read,
@@ -130,7 +137,7 @@ mod windows_ipc {
             let mut bytes_written = 0u32;
             let result = unsafe {
                 WriteFile(
-                    self.handle,
+                    self.handle.0,
                     buf.as_ptr(),
                     buf.len() as u32,
                     &mut bytes_written,
@@ -144,7 +151,7 @@ mod windows_ipc {
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            let result = unsafe { FlushFileBuffers(self.handle) };
+            let result = unsafe { FlushFileBuffers(self.handle.0) };
             if result == 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -155,7 +162,7 @@ mod windows_ipc {
     impl Drop for PipeStream {
         fn drop(&mut self) {
             unsafe {
-                CloseHandle(self.handle);
+                CloseHandle(self.handle.0);
             }
         }
     }
@@ -166,7 +173,7 @@ mod windows_ipc {
 
     impl PipeListener {
         pub fn accept(&self) -> io::Result<PipeStream> {
-            let result = unsafe { ConnectNamedPipe(self.handle, ptr::null()) };
+            let result = unsafe { ConnectNamedPipe(self.handle.0, ptr::null()) };
             if result == 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -179,7 +186,7 @@ mod windows_ipc {
     impl Drop for PipeListener {
         fn drop(&mut self) {
             unsafe {
-                CloseHandle(self.handle);
+                CloseHandle(self.handle.0);
             }
         }
     }
@@ -198,10 +205,10 @@ mod windows_ipc {
                 ptr::null(),
             )
         };
-        if handle == INVALID_HANDLE_VALUE {
+        if handle == INVALID_HANDLE_VALUE.0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(PipeListener { handle })
+        Ok(PipeListener { handle: Handle(handle) })
     }
 
     pub fn connect_to_pipe() -> io::Result<PipeStream> {
@@ -217,10 +224,10 @@ mod windows_ipc {
                 ptr::null_mut(),
             )
         };
-        if handle == INVALID_HANDLE_VALUE {
+        if handle == INVALID_HANDLE_VALUE.0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(PipeStream { handle })
+        Ok(PipeStream { handle: Handle(handle) })
     }
 
     fn make_pipe_name() -> Vec<u8> {
@@ -229,6 +236,39 @@ mod windows_ipc {
         // Пока: фиксированное имя (в полной реализации нужно получить SID).
         let name = b"\\\\.\\pipe\\Leash\0".to_vec();
         name
+    }
+}
+
+/// Трейт для проверки, жив ли MCP-клиент. Реализован для UnixStream (Unix) и PipeStream (Windows).
+trait ClientConnection: Read {
+    /// Вернёт true, если клиент разорвал соединение.
+    fn is_gone(&self) -> bool;
+}
+
+#[cfg(unix)]
+impl ClientConnection for UnixStream {
+    fn is_gone(&self) -> bool {
+        match self.try_clone() {
+            Ok(mut client) => {
+                if client.set_nonblocking(true).is_err() {
+                    return true;
+                }
+                let mut byte = [0u8; 1];
+                let result = client.read(&mut byte);
+                let restored = client.set_nonblocking(false).is_ok();
+                !restored || !matches!(result, Err(ref e) if e.kind() == io::ErrorKind::WouldBlock)
+            }
+            Err(_) => true,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl ClientConnection for windows_ipc::PipeStream {
+    fn is_gone(&self) -> bool {
+        // На Windows пока упрощённо: считаем, что клиент жив.
+        // Полная реализация требит PeekNamedPipe, что усложняет код.
+        false
     }
 }
 
@@ -325,11 +365,11 @@ impl<W: Write> Hub<W> {
     /// Ответ расширения или `None` по таймауту. Ушедший клиент не прерывает
     /// ожидание: после `end` расширение ответит быстро, и очередь освободится
     /// в согласованном состоянии.
-    fn wait(
+    fn wait<C: ClientConnection>(
         &self,
         rx: &mpsc::Receiver<Value>,
         session: u64,
-        client: &UnixStream,
+        client: &C,
         ended: &mut bool,
     ) -> Option<Value> {
         let deadline = Instant::now() + CALL_TIMEOUT;
@@ -342,7 +382,7 @@ impl<W: Write> Hub<W> {
             if Instant::now() >= deadline {
                 return None;
             }
-            if !*ended && gone(client) {
+            if !*ended && client.is_gone() {
                 *ended = true;
                 self.end(session);
             }
@@ -360,12 +400,12 @@ impl<W: Write> Hub<W> {
     /// Пока вызов идёт, `client` проверяется: если MCP-клиент ушёл, расширение
     /// сразу узнаёт об этом (`end`) и закрывает вопросы этого сеанса, а не
     /// держит очередь до таймаута подтверждения. `None` — сеанс окончен.
-    fn call(
+    fn call<C: ClientConnection>(
         &self,
         session: u64,
         tool: &str,
         input: &Value,
-        client: &UnixStream,
+        client: &C,
     ) -> Option<(String, bool)> {
         let Ok(_turn) = self.turn.lock() else {
             return Some(("Мост в неисправном состоянии.".into(), true));
@@ -447,36 +487,40 @@ fn client<W: Write>(hub: &Hub<W>, conn: UnixStream, session: u64) -> io::Result<
 /// Один MCP-процесс через именованный канал (Windows).
 #[cfg(windows)]
 fn client_pipe<W: Write>(hub: &Hub<W>, mut conn: windows_ipc::PipeStream, session: u64) -> io::Result<()> {
-    let mut lines = BufReader::new(&mut conn);
-    while let Some(line) = frame::read_line(&mut lines)? {
-        let Some(req) = parse_json(&line) else {
-            return Ok(());
-        };
-        let id = req.get("id").cloned().unwrap_or(Value::Null);
-        let tool = req.get("tool").and_then(Value::as_str).unwrap_or_default();
-        let input = req.get("input").cloned().unwrap_or(Value::Obj(Vec::new()));
-        // Имя проверяется и здесь: в расширение уходят только известные вызовы.
-        let (text, is_error) = if tools::definitions().iter().any(|t| t.name == tool)
-            && matches!(input, Value::Obj(_))
-        {
-            // TODO: Нужно передать соединение для проверки gone
-            match hub.call(session, tool, &input, &conn) {
-                Some(reply) => reply,
-                None => return Ok(()),
-            }
+    loop {
+        let mut lines = BufReader::new(&mut conn);
+        if let Some(line) = frame::read_line(&mut lines)? {
+            drop(lines);
+            let Some(req) = parse_json(&line) else {
+                return Ok(());
+            };
+            let id = req.get("id").cloned().unwrap_or(Value::Null);
+            let tool = req.get("tool").and_then(Value::as_str).unwrap_or_default();
+            let input = req.get("input").cloned().unwrap_or(Value::Obj(Vec::new()));
+            // Имя проверяется и здесь: в расширение уходят только известные вызовы.
+            let (text, is_error) = if tools::definitions().iter().any(|t| t.name == tool)
+                && matches!(input, Value::Obj(_))
+            {
+                // На Windows упрощённо: не проверяем is_gone, полная реализация требует PeekNamedPipe
+                match hub.call(session, tool, &input, &conn) {
+                    Some(reply) => reply,
+                    None => return Ok(()),
+                }
+            } else {
+                ("Неизвестный вызов.".into(), true)
+            };
+            frame::write_line(
+                &mut conn,
+                &Value::obj(vec![
+                    ("id", id),
+                    ("text", Value::str(text)),
+                    ("isError", Value::Bool(is_error)),
+                ]),
+            )?;
         } else {
-            ("Неизвестный вызов.".into(), true)
-        };
-        frame::write_line(
-            &mut conn,
-            &Value::obj(vec![
-                ("id", id),
-                ("text", Value::str(text)),
-                ("isError", Value::Bool(is_error)),
-            ]),
-        )?;
+            return Ok(());
+        }
     }
-    Ok(())
 }
 
 /// Обслуживание до закрытия канала Firefox (Windows).
@@ -526,19 +570,6 @@ where
         }
     }
     Ok(())
-}
-
-/// Ушёл ли MCP-клиент. Пока идёт вызов, клиент ничего не шлёт (он ждёт ответа),
-/// поэтому конец потока, ошибка или лишние данные — всё значит «сеанс кончен».
-#[cfg(unix)]
-fn gone(client: &UnixStream) -> bool {
-    if client.set_nonblocking(true).is_err() {
-        return true;
-    }
-    let mut byte = [0u8; 1];
-    let result = (&*client).read(&mut byte);
-    let restored = client.set_nonblocking(false).is_ok();
-    !restored || !matches!(result, Err(ref e) if e.kind() == io::ErrorKind::WouldBlock)
 }
 
 #[cfg(test)]
@@ -674,5 +705,66 @@ mod tests {
         drop(ext_side);
         let reader = host_side.try_clone().unwrap();
         assert!(serve_unix(listener, reader, host_side).is_ok());
+    }
+
+    /// Test Windows named pipe IPC round-trip (server + client in same process).
+    /// This tests that PipeListener can accept connections and exchange messages.
+    #[cfg(windows)]
+    #[test]
+    fn windows_pipe_round_trip() {
+        use std::sync::{Arc, Mutex};
+
+        let listener = windows_ipc::create_listener().expect("Failed to create listener");
+        let test_msg = Value::obj(vec![("test", Value::str("hello from pipe"))]);
+        let received = Arc::new(Mutex::new(None));
+        let received_clone = Arc::clone(&received);
+
+        // Spawn listener thread
+        let listener_thread = thread::spawn(move || {
+            match listener.accept() {
+                Ok(mut conn) => {
+                    let mut buf = [0u8; 256];
+                    match conn.read(&mut buf) {
+                        Ok(n) if n > 0 => {
+                            if let Some(msg) = parse_json(&String::from_utf8_lossy(&buf[..n])) {
+                                *received_clone.lock().unwrap() = Some(msg);
+                            }
+                        }
+                        _ => {}
+                    }
+                    // Send response
+                    let response = Value::str("ok").to_json();
+                    let _ = conn.write(response.as_bytes());
+                }
+                Err(_) => {}
+            }
+        });
+
+        // Give listener time to start
+        thread::sleep(Duration::from_millis(100));
+
+        // Connect and send message
+        match windows_ipc::connect_to_pipe() {
+            Ok(mut client) => {
+                let msg_json = test_msg.to_json();
+                let _ = client.write(msg_json.as_bytes());
+
+                // Read response
+                let mut response_buf = [0u8; 256];
+                if let Ok(n) = client.read(&mut response_buf) {
+                    let response = String::from_utf8_lossy(&response_buf[..n]).to_string();
+                    assert_eq!(response, "\"ok\"");
+                }
+            }
+            Err(_) => panic!("Failed to connect to pipe"),
+        }
+
+        listener_thread.join().unwrap();
+        let received_msg = received.lock().unwrap();
+        assert!(received_msg.is_some(), "Message should be received");
+        assert_eq!(
+            received_msg.as_ref().unwrap().get("test"),
+            Some(&Value::str("hello from pipe"))
+        );
     }
 }

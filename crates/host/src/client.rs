@@ -24,7 +24,9 @@ pub struct Firefox {
 #[cfg(windows)]
 pub struct Firefox {
     socket: PathBuf,
-    conn: Option<std::io::Cursor<Vec<u8>>>, // Placeholder для Windows
+    // Windows pipes cannot be cloned, so we keep the stream directly
+    // and don't use BufReader. We'll implement our own buffering if needed.
+    conn: Option<std::sync::Arc<std::sync::Mutex<crate::native::windows_ipc::PipeStream>>>,
     next: u64,
 }
 
@@ -85,8 +87,48 @@ impl Firefox {
 
     #[cfg(windows)]
     fn try_call(&mut self, tool: &str, input: &Value) -> io::Result<(String, bool)> {
-        // Windows implementation placeholder
-        Err(io::Error::other("Windows IPC not yet implemented"))
+        use crate::native::windows_ipc;
+        use std::sync::{Arc, Mutex};
+
+        if self.conn.is_none() {
+            let s = windows_ipc::connect_to_pipe()?;
+            self.conn = Some(Arc::new(Mutex::new(s)));
+        }
+        let id = self.next;
+        self.next += 1;
+        let Some(conn) = self.conn.as_mut() else {
+            return Err(io::Error::other("нет соединения"));
+        };
+
+        {
+            let mut stream = conn.lock().map_err(|_| io::Error::other("мост в неисправном состоянии"))?;
+            frame::write_line(
+                &mut *stream,
+                &Value::obj(vec![
+                    ("id", Value::Num(id as f64)),
+                    ("tool", Value::str(tool)),
+                    ("input", input.clone()),
+                ]),
+            )?;
+        }
+
+        let line = {
+            let mut stream = conn.lock().map_err(|_| io::Error::other("мост в неисправном состоянии"))?;
+            let mut reader = BufReader::new(&mut *stream);
+            frame::read_line(&mut reader)?.ok_or_else(|| io::Error::other("мост закрыл соединение"))?
+        };
+
+        let reply = parse_json(&line).ok_or_else(|| io::Error::other("ответ моста не JSON"))?;
+        if reply.get("id").and_then(Value::as_f64) != Some(id as f64) {
+            return Err(io::Error::other("ответ не на этот вызов"));
+        }
+        match (
+            reply.get("text").and_then(Value::as_str),
+            reply.get("isError").and_then(Value::as_bool),
+        ) {
+            (Some(t), Some(e)) => Ok((t.to_owned(), e)),
+            _ => Err(io::Error::other("некорректный ответ моста")),
+        }
     }
 }
 
