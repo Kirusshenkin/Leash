@@ -14,6 +14,7 @@ decides what is allowed — not the model.
 [![release](https://img.shields.io/github/v/release/Kirusshenkin/leash-firefox-extension)](https://github.com/Kirusshenkin/leash-firefox-extension/releases/latest)
 ![Firefox 140+](https://img.shields.io/badge/Firefox-140%2B-FF7139?logo=firefoxbrowser&logoColor=white)
 ![macOS | Linux](https://img.shields.io/badge/bridge-macOS%20%7C%20Linux-555)
+[![License: MPL 2.0](https://img.shields.io/badge/license-MPL--2.0-brightgreen)](LICENSE)
 
 **English** · [Русский](README.ru.md)
 
@@ -213,6 +214,11 @@ from `$FIREFOX`, `/Applications/Firefox.app` or `PATH`.
   from releases (`get.sh`).
 
 </details>
+
+## License
+
+[Mozilla Public License 2.0](LICENSE). You can use Leash in any project, including closed ones;
+changes to Leash files themselves stay open when you distribute them.
 
 ---
 

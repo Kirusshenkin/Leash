@@ -16,6 +16,7 @@
    `data_collection_permissions` есть на Android только с версии 142. Leash
    работает только на десктопе (`sidebar_action` на Android нет), поэтому при
    загрузке платформу «Firefox for Android» не отмечать.
+5. Лицензия в форме AMO — Mozilla Public License 2.0 (файл `LICENSE`).
 
 ## Исходный код для ревьюеров
 
