@@ -3,7 +3,7 @@
 # скачивает leash-host из GitHub Releases, сверяет SHA-256 с SHA256SUMS
 # релиза, кладёт в ~/.local/bin и регистрирует в Firefox.
 #
-#   curl -fsSL https://raw.githubusercontent.com/Kirusshenkin/Leash/master/scripts/get.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Kirusshenkin/leash-firefox-extension/master/scripts/get.sh | sh
 #
 # LEASH_VERSION=v0.2.0 — конкретный релиз (по умолчанию последний),
 # LEASH_BIN_DIR=… — другой каталог.
@@ -13,7 +13,7 @@
 # заблокирован — для этого случая есть только сборка из исходников.
 set -eu
 
-repo=Kirusshenkin/Leash
+repo=Kirusshenkin/leash-firefox-extension
 version=${LEASH_VERSION:-latest}
 dest_dir=${LEASH_BIN_DIR:-$HOME/.local/bin}
 
